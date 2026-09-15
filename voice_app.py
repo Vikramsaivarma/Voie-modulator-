@@ -320,9 +320,9 @@ class VoiceControlApp:
         "open a Chrome search as well. Use AUTO-BEST in the app to pick the "
         "best microphone. Say stop listening to pause, start listening to "
         "resume, and help for this message. I also control the mouse cursor "
-        "with your hand: raise your index finger to move, pinch to click, "
-        "make a peace sign to scroll, and make a fist to drag. Say start "
-        "hand cursor or stop hand cursor to switch it on or off."
+        "with your hand: raise your index finger or open hand to move, pinch to "
+        "click, make a peace sign to scroll, and make a fist to drag. Say "
+        "start hand cursor or stop hand cursor to switch it on or off."
     )
 
     GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon",

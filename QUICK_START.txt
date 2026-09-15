@@ -98,6 +98,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   GESTURE                ACTION
   -----------            -----------------------------------------------
   Index finger up        Move the cursor
+  Open hand (5 fingers)  Move the cursor too (wider range, easier to hold)
   Pinch (thumb+index)    Click / tap (hold it to drag)
   Peace sign             Scroll (move your hand up or down)
   Fist                   Hold the LEFT mouse button (drag/select)

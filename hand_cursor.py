@@ -6,7 +6,7 @@
  The webcam feed is read in a background daemon thread and MediaPipe Hands
  finds one hand. The user controls the mouse pointer with gestures:
 
-     Index finger raised ....... move the cursor
+     Index finger up (or open hand) ... move the cursor
      Pinch (thumb+index) ....... left click; hold it = drag
      Peace sign (idx+middle) ... scroll (move the hand up / down)
      Fist ...................... hold the left button (drag / select)
@@ -64,7 +64,7 @@ PINKY_PIP    = 18
 PINKY_TIP    = 20
 
 # Horizontal multiplier applied to hand movement when scrolling.
-SCROLL_GAIN  = 0.6
+SCROLL_GAIN  = 0.05
 # How close (as a fraction of hand size) the thumb and index must be before we
 # call it a pinch.
 PINCH_RATIO  = 0.45
@@ -197,11 +197,15 @@ class HandCursorEngine:
                 pass
 
     def _to_screen(self, tip):
-        """Map a normalised fingertip to real screen pixels, centred."""
+        """Map a normalised fingertip to real screen pixels, centred.
+
+        Sensitivity 1.0 maps the whole camera frame onto the ENTIRE screen
+        (both axes), so the cursor can reach every corner.
+        """
         w, h = self._screen
-        sx, sy = self.sensitivity, (self.sensitivity * h) / w
-        x = int(w / 2 + (tip.x - 0.5) * w * sx)
-        y = int(h / 2 + (tip.y - 0.5) * h * sy)
+        s = self.sensitivity
+        x = int(w / 2 + (tip.x - 0.5) * w * s)
+        y = int(h / 2 + (tip.y - 0.5) * h * s)
         return max(0, min(x, w - 1)), max(0, min(y, h - 1))
 
     def _move_pointer(self, x, y):
@@ -281,7 +285,7 @@ class HandCursorEngine:
             if clicks:
                 self._scroll_acc -= clicks
                 try:
-                    pyautogui.scroll(clicks)
+                    pyautogui.scroll(max(-30, min(30, clicks)))
                 except Exception:
                     pass
             self._emit_state("PEACE = SCROLL", None)
@@ -291,11 +295,12 @@ class HandCursorEngine:
             self._emit_state("FIST = DRAG", None)
         else:
             self._release_button()
-            if mode == "index":
+            if idx_ext:
                 self._move_pointer(x, y)
-                self._emit_state("INDEX = MOVE", None)
+                self._emit_state("MOVE" if sum(extended) > 1
+                                 else "INDEX = MOVE", None)
             else:
-                self._emit_state(mode.upper(), None)
+                self._emit_state("OPEN HAND / UNKNOWN", None)
 
     # ------------------------------------------------------------------
     # Main loop (engine thread)
