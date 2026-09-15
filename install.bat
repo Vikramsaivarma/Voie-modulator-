@@ -87,7 +87,7 @@ REM  STEP 5: Verify that every module can be imported
 REM ------------------------------------------------------------
 echo.
 echo [STEP 3/4] Verifying imports...
-%PY% -c "import speech_recognition, pyttsx3, pyautogui, pyaudio; print('   All dependencies import OK.')" 2>nul
+%PY% -c "import speech_recognition, pyttsx3, pyautogui, pyaudio, cv2, mediapipe; print('   All dependencies import OK.')" 2>nul
 if errorlevel 1 (
     echo.
     echo [ERROR] Verification failed - one or more packages cannot import.
@@ -95,9 +95,11 @@ if errorlevel 1 (
     %PY% -c "import pyttsx3"             2>nul || echo   - pyttsx3 FAILED
     %PY% -c "import pyautogui"          2>nul || echo   - pyautogui FAILED
     %PY% -c "import pyaudio"            2>nul || echo   - pyaudio FAILED
+    %PY% -c "import cv2, mediapipe"     2>nul || echo   - cv2/mediapipe FAILED (hand cursor)
     pause
     exit /b 1
 )
+%PY% -c "import PIL; print('   Pillow (camera preview) OK.')" 2>nul || echo   (warn) Pillow missing - run:  pip install Pillow
 
 REM ------------------------------------------------------------
 REM  STEP 6: Success banner

@@ -19,6 +19,8 @@ Build a Windows desktop voice-control app as a single Python 3.11+ file, `voice_
   - PyAutoGUI==0.9.54          (keyboard/mouse automation)
   - PyAudio==0.2.14            (microphone capture, has cp311 wheels)
   - requests>=2.31.0           (Gemini HTTP API calls)
+  - mediapipe==0.10.14         (hand tracking; bundles OpenCV; 0.10.21+ wheels fail DLL load on Windows)
+  - Pillow>=10.0.0             (embedded camera preview in the GUI)
 
 ## App features (all required)
 1. Dark-themed Tk GUI with a green terminal-style log area.
@@ -38,11 +40,13 @@ Build a Windows desktop voice-control app as a single Python 3.11+ file, `voice_
 7. Startup check: if dependencies are missing, show a friendly "Missing Dependencies" messagebox instead of crashing.
 8. Entry point: `if __name__ == "__main__": main()`.
 9. Threads: keep TTS and speech recognition off the main GUI thread; safe shutdown on close (stop recognizer thread and TTS queue).
+10. Hand-gesture "air cursor" in a SECOND module `hand_cursor.py`: a `HandCursorEngine` class run in its own daemon thread using MediaPipe Hands + OpenCV through the webcam (640x480, mirrored, EMA-smoothed). Gestures: index finger up = move cursor, pinch (thumb+index) = left click, peace sign (index+middle) = scroll via vertical hand motion, fist = hold left button (drag). It must forward non-GUI events (`started`, `stopped`, `error`, `log`, `hand_state`) and optional throttled preview frames to the host app through callbacks (never touch tkinter directly), and release the mouse button and camera on stop.
+11. The main app must import the engine optionally (friendly log if MediaPipe/Pillow missing), add a HAND CURSOR GUI row (START/STOP buttons, Cam: dropdown 0-5, Preview checkbox, live gesture+position label, embedded camera preview via Pillow ImageTk throttled ~12 fps), auto-start the webcam when the app opens if `hand_mode` is "on", support voice commands "start hand cursor" / "stop hand cursor", and stop the engine in `on_close`. Config gains: hand_mode, camera_index, hand_sensitivity, hand_scroll_speed, show_preview.
 
 ## Extra files to create in the same folder
 - `requirements.txt` — exact pinned list above with short comments.
 - `install.bat` — locates a Python launcher (`python`, else `py`), checks version >= 3.8, upgrades pip/setuptools/wheel, installs `-r requirements.txt`, verifies all four core imports, prints success, and shows how to launch.
-- `QUICK_START.txt` — sections: requirements, install instructions, how to start (`python voice_app.py` or `py voice_app.py`), microphone selection guide, Gemini AI usage, full voice-command list, troubleshooting table, and file list.
+- `QUICK_START.txt` — sections: requirements, install instructions, how to start (`python voice_app.py` or `py voice_app.py`), microphone selection guide, Gemini AI usage, full voice-command list, air-cursor (hand control) gesture guide, troubleshooting table, and file list.
 - `BUILD_PROMPT.md` — this exact prompt.
 - `.gitignore` — ignores `voc_config.json`, `__pycache__/`, `*.pyc`.
 

@@ -9,6 +9,8 @@
  * Microphone DEVICE SELECTOR (fixes "not listening" on noisy or wrong mics).
  * Recognition LANGUAGE selector.
  * Start / Stop listening buttons + a "Test Microphone" button.
+ * HAND-CURSOR air mouse: webcam hand tracking that moves the cursor
+   (index finger), clicks/drags (pinch / fist) and scrolls (peace sign).
  * Real-time scrolling command log with live status.
  * Stabilised voice-activity detection (VAD) that does not drift away
    from normal speech levels in a noisy room.
@@ -83,6 +85,21 @@ try:
 except ImportError:
     DEPENDENCIES_OK = False
     pyautogui = pyttsx3 = requests = sr = None
+
+# Hand-gesture "air cursor" engine + camera preview support. These are kept
+# optional: the voice app still runs if MediaPipe/Pillow are not installed.
+try:
+    from hand_cursor import (HAND_DEPS_OK, HandCursorEngine, bgr_frame_to_pil)
+except ImportError:
+    HAND_DEPS_OK = False
+    HandCursorEngine = bgr_frame_to_pil = None
+
+try:
+    from PIL import ImageTk
+    PIL_OK = True
+except ImportError:
+    ImageTk = None
+    PIL_OK = False
 
 
 # ----------------------------------------------------------------------
@@ -207,6 +224,12 @@ DEFAULT_CONFIG = {
     "voice_rate": 180,
     "gemini_api_key": "",
     "gemini_model": "gemini-3.6-flash",
+    # Hand-gesture air-cursor settings.
+    "hand_mode": "on",          # "on" = webcam starts with the app
+    "camera_index": 0,          # which webcam to use
+    "hand_sensitivity": 1.0,    # 1.0 = full frame maps to the screen
+    "hand_scroll_speed": 1.0,   # wheel sensitivity while making a peace sign
+    "show_preview": True,       # embed the camera view in the GUI
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -296,7 +319,10 @@ class VoiceControlApp:
         "word search. I answer questions after the word ask, and questions "
         "open a Chrome search as well. Use AUTO-BEST in the app to pick the "
         "best microphone. Say stop listening to pause, start listening to "
-        "resume, and help for this message."
+        "resume, and help for this message. I also control the mouse cursor "
+        "with your hand: raise your index finger to move, pinch to click, "
+        "make a peace sign to scroll, and make a fist to drag. Say start "
+        "hand cursor or stop hand cursor to switch it on or off."
     )
 
     GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon",
@@ -305,9 +331,14 @@ class VoiceControlApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Voice Control - Speech Application")
-        self.root.geometry("600x620")
+        self.root.geometry("630x890")
         self.root.configure(bg=BG_COLOR)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Hand-cursor engine state (engine itself is created lazily).
+        self._hand_engine = None
+        self._hand_preview_photo = None
+        self._preview_warning_done = False
 
         self.config = load_config()
         self._ready = False  # blocks control callbacks until the GUI is built
@@ -336,6 +367,10 @@ class VoiceControlApp:
         self._http = requests.Session()
 
         self._build_gui()
+
+        # Auto-start the webcam hand control when the app opens.
+        if HAND_DEPS_OK and self.config.get("hand_mode", "on") == "on":
+            self.root.after(300, self.start_hand_cursor)
 
     # ------------------------------------------------------------------
     # GUI construction
@@ -407,6 +442,66 @@ class VoiceControlApp:
         self._meter_fill = None
         self._meter_color = "#238636"
 
+        # --- Hand cursor (air mouse / touch) section --------------------
+        hand_row = tk.Frame(self.root, bg=BG_COLOR)
+        hand_row.pack(fill=tk.X, padx=12, pady=(6, 0))
+
+        tk.Label(hand_row, text="HAND CURSOR:", font=(FONT_NAME, 9, "bold"),
+                 bg=BG_COLOR, fg="#58a6ff").pack(side=tk.LEFT)
+
+        self.hand_state_var = tk.StringVar(value="hand: off")
+        tk.Label(hand_row, textvariable=self.hand_state_var,
+                 font=(FONT_NAME, 8), bg=BG_COLOR, fg=LOG_FG_COLOR,
+                 anchor="w").pack(side=tk.LEFT, padx=(6, 0))
+
+        self.hand_stop_btn = tk.Button(
+            hand_row, text="STOP", font=(FONT_NAME, 8, "bold"),
+            bg=BTN_STOP_BG_COLOR, fg=BTN_FG_COLOR,
+            activebackground="#8b2c2c", activeforeground=BTN_FG_COLOR,
+            relief=tk.FLAT, cursor="hand2", padx=10, pady=2,
+            command=self.stop_hand_cursor, state="disabled",
+        )
+        self.hand_stop_btn.pack(side=tk.RIGHT)
+
+        self.hand_btn = tk.Button(
+            hand_row, text="START", font=(FONT_NAME, 8, "bold"),
+            bg=BTN_TEST_BG_COLOR, fg=BTN_FG_COLOR,
+            activebackground="#2c6496", activeforeground=BTN_FG_COLOR,
+            relief=tk.FLAT, cursor="hand2", padx=10, pady=2,
+            command=self._hand_start_btn,
+        )
+        self.hand_btn.pack(side=tk.RIGHT, padx=(0, 4))
+
+        tk.Label(hand_row, text="Cam:", font=(FONT_NAME, 8),
+                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.RIGHT, padx=(10, 2))
+        self.camera_var = tk.StringVar(
+            value=str(self.config.get("camera_index", 0)))
+        cam_menu = tk.OptionMenu(
+            hand_row, self.camera_var, "0", "1", "2", "3", "4", "5",
+            command=self._on_camera_change,
+        )
+        cam_menu.config(bg=BG_COLOR, fg=FG_COLOR, highlightthickness=1,
+                        highlightbackground="#30363d")
+        cam_menu.pack(side=tk.RIGHT)
+
+        self.preview_var = tk.BooleanVar(
+            value=bool(self.config.get("show_preview", True)))
+        tk.Checkbutton(
+            hand_row, text="Preview", variable=self.preview_var,
+            font=(FONT_NAME, 8), bg=BG_COLOR, fg="#8b949e",
+            selectcolor=BG_COLOR, activebackground=BG_COLOR,
+            activeforeground="#8b949e", highlightthickness=0, bd=0,
+            command=self._on_preview_toggle,
+        ).pack(side=tk.RIGHT, padx=(0, 8))
+
+        self.preview_canvas = tk.Label(
+            self.root, bg=LOG_BG_COLOR, text="(preview turned off)",
+            font=(FONT_NAME, 8), fg="#8b949e",
+            highlightthickness=1, highlightbackground="#30363d",
+        )
+        self.preview_canvas.pack(fill=tk.X, padx=12, pady=(4, 0),
+                                 ipadx=6, ipady=6)
+
         # --- Live "what the app heard" display ----------------------------
         self.heard_var = tk.StringVar(value="Heard: (nothing yet)")
         tk.Label(self.root, textvariable=self.heard_var,
@@ -464,7 +559,8 @@ class VoiceControlApp:
             self.root,
             text="Say: Open <app> | Type <text> | Search <query> | "
                  "Ask <question> | New/Close/Next Tab | Refresh | "
-                 "Minimize | Lock Screen | Stop Listening | Help",
+                 "Minimize | Lock Screen | Stop Listening | Help | "
+                 "Start/Stop Hand Cursor",
             font=(FONT_NAME, 8), bg=BG_COLOR, fg="#58a6ff",
             wraplength=570, justify=tk.LEFT,
         ).pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=4)
@@ -652,7 +748,9 @@ class VoiceControlApp:
         """Send a message to the GUI thread via the safe queue.
 
         kind: "log" | "status" | "running" | "level" | "heard" |
-              "threshold" | "autoselect" | "autodone" | "testdone" | "quit"
+              "threshold" | "autoselect" | "autodone" | "testdone" |
+              "hand_state" | "hand_preview" | "started" | "stopped" |
+              "error" | "quit"
         """
         self._queue.put((kind, data))
 
@@ -677,6 +775,18 @@ class VoiceControlApp:
                 elif kind == "threshold":
                     self._meter_threshold = data
                     self.threshold_var.set(f"speech threshold: {data:.0f}")
+                elif kind == "hand_state":
+                    self.hand_state_var.set(data)
+                elif kind == "hand_preview":
+                    self._show_preview(data)
+                elif kind == "started":
+                    self._set_hand_ui(True, "hand: ON")
+                    self._append_log(data)
+                elif kind == "stopped":
+                    self._set_hand_ui(False, "hand: off")
+                elif kind == "error":
+                    self._set_hand_ui(False, "hand: error")
+                    self._append_log(data)
                 elif kind == "autoselect":
                     self._apply_autoselect(data)
                 elif kind == "testdone" or kind == "autodone":
@@ -1062,6 +1172,19 @@ class VoiceControlApp:
         if lowered in self.GREETINGS:
             self._speak("Hello. How can I help you?")
             self._post("log", "[i] Greeting returned.")
+            return
+
+        # ---- Hand cursor (air mouse / touch) ------------------------------
+        if re.search(r"\b(hand cursor|hand mode|hand control|air cursor|"
+                     r"air mouse)\b", lowered):
+            if re.search(r"\b(start|turn on|enable|activate|begin)\b", lowered):
+                self.start_hand_cursor()
+                self._post("log", "[i] Starting hand cursor.")
+                self._speak("Starting hand cursor.")
+            else:
+                self.stop_hand_cursor()
+                self._post("log", "[i] Stopping hand cursor.")
+                self._speak("Stopping hand cursor.")
             return
 
         # ============ Discrete command keywords ==========================
@@ -1469,12 +1592,111 @@ class VoiceControlApp:
             self._post("log", f"[!] Text-to-speech error: {exc}")
 
     # ------------------------------------------------------------------
+    # Hand cursor (air mouse / touch) - GUI tie-in
+    # ------------------------------------------------------------------
+    def _hand_start_btn(self):
+        """GUI button: store the chosen camera, then start the engine."""
+        try:
+            self.config["camera_index"] = int(self.camera_var.get())
+        except (TypeError, ValueError):
+            pass
+        self.start_hand_cursor()
+
+    def _on_camera_change(self, _choice):
+        try:
+            self.config["camera_index"] = int(self.camera_var.get())
+        except (TypeError, ValueError):
+            pass
+
+    def _on_preview_toggle(self):
+        if self._hand_engine is not None:
+            self._hand_engine.set_emit_preview(bool(self.preview_var.get()))
+        if not self.preview_var.get():
+            self.preview_canvas.configure(text="(preview turned off)")
+
+    def start_hand_cursor(self):
+        """Create the engine (if needed) and start it. GUI/thread-safe."""
+        if (self._hand_engine is not None and
+                self._hand_engine.is_running()):
+            return
+        if not HAND_DEPS_OK or HandCursorEngine is None:
+            self._post("log", "[!] Hand-tracking packages missing - run: "
+                              "pip install mediapipe pillow")
+            self._post("status", "Hand cursor: dependencies missing")
+            return
+        try:
+            engine = HandCursorEngine(
+                camera_index=int(self.config.get("camera_index", 0)),
+                sensitivity=float(self.config.get("hand_sensitivity", 1.0)),
+                scroll_speed=float(self.config.get("hand_scroll_speed", 1.0)),
+                emit_preview=bool(self.preview_var.get() and PIL_OK),
+                on_event=self._hand_event,
+                on_preview=self._hand_preview,
+            )
+        except Exception as exc:
+            self._post("log", f"[!] Hand cursor failed to start: {exc}")
+            return
+        self._hand_engine = engine
+        engine.start()
+
+    def stop_hand_cursor(self):
+        """Stop the engine; the 'stopped' event resets the GUI. Thread-safe."""
+        engine = getattr(self, "_hand_engine", None)
+        if engine is not None:
+            try:
+                engine.stop()
+            except Exception as exc:
+                self._post("log", f"[!] {exc}")
+        self._hand_engine = None
+
+    def _hand_event(self, kind, data):
+        """Callback from the engine thread -> forward into the GUI queue."""
+        self._post(kind, data)
+
+    def _hand_preview(self, frame):
+        """Callback from the engine thread -> queue the camera frame."""
+        self._post("hand_preview", frame)
+
+    def _set_hand_ui(self, running, text):
+        """Update hand-cursor button states and status label (GUI thread)."""
+        try:
+            self.hand_state_var.set(text)
+            self.hand_btn.config(
+                state="disabled" if running else "normal")
+            self.hand_stop_btn.config(
+                state="normal" if running else "disabled")
+        except tk.TclError:
+            pass  # window closing
+
+    def _show_preview(self, frame):
+        """Display a camera frame in the preview area (GUI thread)."""
+        if not PIL_OK or not self.preview_var.get():
+            return
+        try:
+            img = bgr_frame_to_pil(frame)
+            if img is None:
+                return
+            img.thumbnail((600, 200))
+            self._hand_preview_photo = ImageTk.PhotoImage(img)
+            self.preview_canvas.configure(image=self._hand_preview_photo,
+                                          text="")
+        except Exception as exc:
+            if not self._preview_warning_done:
+                self._preview_warning_done = True
+                self._append_log(f"[!] Camera preview unavailable: {exc}")
+
+    # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
     def on_close(self):
         """Clean up threads and close the window."""
         self._listening_event.clear()
         save_config(self.config)
+        if getattr(self, "_hand_engine", None) is not None:
+            try:
+                self._hand_engine.stop()
+            except Exception:
+                pass
         try:
             pyautogui.FAILSAFE = False
         except Exception:

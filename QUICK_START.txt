@@ -5,7 +5,9 @@
 A Windows desktop app that lets you control your PC with your voice.
 Dark-themed GUI, green terminal log, Google speech-to-text, offline voice
 feedback (pyttsx3), a LIVE voice-level meter, a "what the app heard"
-display, Gemini-powered answers, and AUTO-BEST microphone selection.
+display, Gemini-powered answers, AUTO-BEST microphone selection, and a
+HAND-CURSOR air mouse: use your webcam to move the pointer and "touch"
+the screen with finger gestures.
 
 --------------------------------------------------------------------------------
 1) REQUIREMENTS
@@ -37,11 +39,16 @@ display, Gemini-powered answers, and AUTO-BEST microphone selection.
 
        python voice_app.py
 
-  ...or double-click voice_app.py. Use "py" instead of "python" if the
-  latter is not in PATH.
+...or double-click voice_app.py. Use "py" instead of "python" if the
+   latter is not in PATH.
 
-  Allow microphone access when Windows asks
-  (Settings -> Privacy & security -> Microphone -> ON).
+   The webcam hand-cursor starts automatically when the app opens. If you
+   do not want it, press STOP in the HAND CURSOR row (or say it later).
+
+   Allow microphone access when Windows asks
+   (Settings -> Privacy & security -> Microphone -> ON).
+   Also allow Camera access for the hand cursor
+   (Settings -> Privacy & security -> Camera -> ON).
 
 --------------------------------------------------------------------------------
 4) PICK THE RIGHT MICROPHONE  (IMPORTANT!)
@@ -84,7 +91,34 @@ By default Windows may pick a noisy or acoustic microchip. If the app
       Or simply: "Tell me a fun fact"
 
 --------------------------------------------------------------------------------
-6) VOICE COMMANDS
+6) AIR CURSOR / HAND CONTROL (webcam "touch")
+-------------------------------------------------------------------------------
+The HAND CURSOR row in the app turns your webcam into an air mouse:
+
+  GESTURE                ACTION
+  -----------            -----------------------------------------------
+  Index finger up        Move the cursor
+  Pinch (thumb+index)    Click / tap (hold it to drag)
+  Peace sign             Scroll (move your hand up or down)
+  Fist                   Hold the LEFT mouse button (drag/select)
+
+  * Starts automatically when the app opens. Use START / STOP to switch.
+  * Say "start hand cursor" or "stop hand cursor" to do it by voice.
+  * Pick the correct webcam with the "Cam:" dropdown if nothing moves.
+  * Untick "Preview" to hide the small camera view and use less CPU.
+  * Raise ONE hand facing the camera, about arm's length away. Silhouette
+    it against your face/body for steadier tracking.
+  * Keep a hand resting visible while clicking - moving it fully away
+    releases the button after about half a second.
+
+  Fine tuning lives in voc_config.json:
+    camera_index        which webcam (0 = first)
+    hand_sensitivity    zoom of the pointer mapping (1.0 = full screen)
+    hand_scroll_speed   how fast the peace sign scrolls
+    hand_mode           "on" = webcam starts with the app, "off" = manual
+
+-------------------------------------------------------------------------------
+7) VOICE COMMANDS
 --------------------------------------------------------------------------------
   APPS:
     "Open Chrome"   "Open Firefox"   "Open Notepad"   "Open Calculator"
@@ -116,6 +150,7 @@ By default Windows may pick a noisy or acoustic microchip. If the app
   LIFECYCLE:
     "Stop Listening"   -> pauses; say "Start Listening" to resume
     "Start Listening"
+    "Start Hand Cursor" / "Stop Hand Cursor"  -> air mouse on/off
     "Help"             -> app reads the command list aloud
     "Quit" / "Exit"    -> closes the app
 
@@ -125,7 +160,7 @@ By default Windows may pick a noisy or acoustic microchip. If the app
     * Speak a little slower than normal, especially right after a beep.
 
 --------------------------------------------------------------------------------
-7) TROUBLESHOOTING
+8) TROUBLESHOOTING
 --------------------------------------------------------------------------------
   * App does not listen / "Could not recognize that speech" all the time
       -> See section 4. Switch microphones in the app dropdown and TEST.
@@ -161,18 +196,38 @@ By default Windows may pick a noisy or acoustic microchip. If the app
   * Types / searches in the wrong window
       -> Focus the right window BEFORE saying "Type ..." / "Search ...".
 
-  * "Open Chrome" does nothing
+* "Open Chrome" does nothing
       -> Chrome is installed somewhere unusual. Edit APP_PATHS at the top
          of voice_app.py to point at your install location.
+
+  * Hand cursor: "hand: error" or "camera could not be opened"
+      -> Another app (Zoom, Chrome) is using the webcam. Close it.
+      -> Try a different "Cam:" number and press START.
+      -> Allow Camera access: Settings -> Privacy & security -> Camera.
+
+  * Cursor does not move / is very jumpy
+      -> Stay arm's length from the camera, hand silhouette clear of the
+         background, facing the lens.
+      -> Use the Preview to check the app can see you.
+      -> Lower hand_sensitivity in voc_config.json and restart.
+
+  * No dart / click happens on pinch
+      -> The pinch threshold is tuned for a relaxed thumb+index touch.
+         Make sure the two fingertips actually touch.
+
+  * Webcam keeps turning off or app is slow
+      -> Untick Preview (less conversion work), close other camera apps,
+         and drop the webcam resolution if you can.
 
   * Settings changes are lost after closing
       -> voc_config.json is saved automatically next to the app. Make
          sure the app folder is writable and not read-only.
 
---------------------------------------------------------------------------------
-8) FILES
---------------------------------------------------------------------------------
+-------------------------------------------------------------------------------
+9) FILES
+-------------------------------------------------------------------------------
   voice_app.py        The complete application (Python 3.11+, tkinter)
+  hand_cursor.py      Webcam hand-tracking engine (air mouse / touch)
   requirements.txt    All Python dependencies (pinned working versions)
   install.bat         One-click installer / verifier
   QUICK_START.txt     You are reading it

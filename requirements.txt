@@ -10,3 +10,5 @@ comtypes==1.2.1               # Underlying COM support for pyttsx3 on Windows
 PyAutoGUI==0.9.54            # Keyboard / mouse automation
 PyAudio==0.2.14              # Microphone capture (has wheels for Python 3.11)
 requests>=2.31.0              # HTTP calls to the Gemini API
+mediapipe==0.10.14           # Hand tracking for the air-cursor (bundles OpenCV)
+Pillow>=10.0.0               # Live camera preview embedded in the GUI
