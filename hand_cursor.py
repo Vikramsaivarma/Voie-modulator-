@@ -22,6 +22,14 @@
  classifies the drawn stroke (circle, V, check, L, S, Z, W, line, slash)
  and emits a ``('macro', name)`` event for the app to act on.
 
+ TOUCHPAD mode (v1.7)
+ --------------------
+ Driver mode "touchpad" turns the hand into a relative mouse / laptop
+ trackpad: the pointer follows accumulated hand-center deltas (not the
+ absolute hand position), gestures stay identical (pinch = click, peace =
+ scroll, 3 fingers = right click, fist = drag), and the reach gate is
+ skipped because a trackpad must respond whenever the hand is in frame.
+
  ANTI-ACCIDENT DESIGN (v1.2)
  ---------------------------
  A pose is only trusted after it has been observed for several consecutive
@@ -43,7 +51,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.6.0
+ VERSION   : 1.7.0
 ==============================================================================
 """
 
@@ -164,6 +172,16 @@ MACRO_SAMPLE_GAP = 0.025
 MACRO_COMMIT_TIME = 1.0
 # Match below this average per-point distance wins; otherwise "unknown".
 MACRO_MATCH_MAX = 0.22
+
+# ----------------------------------------------------------------------
+# TOUCHPAD mode: the hand is used like a laptop trackpad / mouse.
+# Cursor = accumulated hand-center DELTA (relative motion), not the
+# absolute position, so it feels like a mouse.
+# ----------------------------------------------------------------------
+TOUCHPAD_GAIN = 2.5         # delta fraction -> screen-fraction multiplier
+TOUCHPAD_SMOOTH = 0.35      # EMA weight applied to the per-frame delta
+TOUCHPAD_NOISE = 0.0015     # ignore deltas below this (tracking jitter)
+TOUCHPAD_MAX_STEP = 0.04    # clamp single-frame jumps (normalised units)
 
 
 def _norm_dist(a, b):
@@ -320,11 +338,13 @@ class HandCursorEngine:
         self._drag_beeped = False    # left-click beeped at drag start
         self._right_drag_beeped = False  # right-click beeped at drag start
         self.training = False          # gesture trainer mode (no mouse driving)
-        self._driver_mode = "cursor"   # "cursor" | "macros"
+        self._driver_mode = "cursor"   # "cursor" | "macros" | "touchpad"
         self._macro_pts = []           # stroke points collected during draw
         self._macro_last_ts = 0.0      # timestamp of last stored sample
         self._macro_last_pt = None     # last stored (x, y)
         self._macro_commit_ts = 0.0    # when the finger stopped moving
+        self._tp_center = None         # last hand-center (touchpad relative)
+        self._tp_sm = (0.0, 0.0)       # EMA-smoothed per-frame delta
 
     # ------------------------------------------------------------------
     # Public control API
@@ -371,8 +391,9 @@ class HandCursorEngine:
             self._release_button(right=True)
 
     def set_mode(self, mode):
-        """Switch driver mode: ``'cursor'`` (default) or ``'macros'``."""
-        if mode not in ("cursor", "macros"):
+        """Switch driver mode: ``'cursor'`` (default), ``'macros'`` or
+        ``'touchpad'``."""
+        if mode not in ("cursor", "macros", "touchpad"):
             return
         if mode == self._driver_mode:
             return
@@ -380,9 +401,13 @@ class HandCursorEngine:
         self._macro_pts.clear()
         self._macro_commit_ts = 0.0
         self._macro_last_pt = None
+        self._tp_center = None
+        self._tp_sm = (0.0, 0.0)
         self._mode = None
         if mode == "cursor":
             self._send("log", "Mode: CURSOR")
+        elif mode == "touchpad":
+            self._send("log", "Mode: TOUCHPAD - move the hand like a mouse")
         else:
             self._send("log", "Mode: DRAW MACROS - trace a shape in the air")
 
@@ -463,6 +488,39 @@ class HandCursorEngine:
         x = int(w / 2 + (tip.x - 0.5) * w * s)
         y = int(h / 2 + (tip.y - 0.5) * h * s)
         return max(0, min(x, w - 1)), max(0, min(y, h - 1))
+
+    def _touchpad_next(self, lm):
+        """Relative cursor step: hand-center delta is added to the cursor.
+
+        Unlike absolute-mode, the hand does not map one-to-one onto the
+        screen - moving the palm across the frame moves the pointer as if
+        you were dragging a finger on a trackpad.
+        """
+        if self._cursor is None:
+            self._cursor = (self._screen[0] // 2, self._screen[1] // 2)
+        w = lm[WRIST]
+        mc = lm[MIDDLE_MCP]
+        center = ((w.x + mc.x) / 2.0, (w.y + mc.y) / 2.0)
+        p0 = self._tp_center
+        if p0 is None:
+            self._tp_center = center
+            return self._cursor
+        dx = center[0] - p0[0]
+        dy = center[1] - p0[1]
+        self._tp_center = center
+        if abs(dx) < TOUCHPAD_NOISE and abs(dy) < TOUCHPAD_NOISE:
+            return self._cursor
+        dx = max(-TOUCHPAD_MAX_STEP, min(dx, TOUCHPAD_MAX_STEP))
+        dy = max(-TOUCHPAD_MAX_STEP, min(dy, TOUCHPAD_MAX_STEP))
+        # EMA on the delta so webcam jitter does not make the pointer dance.
+        sx = self._tp_sm[0] + TOUCHPAD_SMOOTH * (dx - self._tp_sm[0])
+        sy = self._tp_sm[1] + TOUCHPAD_SMOOTH * (dy - self._tp_sm[1])
+        self._tp_sm = (sx, sy)
+        gain = self.sensitivity * TOUCHPAD_GAIN
+        nx = int(self._cursor[0] + sx * self._screen[0] * gain)
+        ny = int(self._cursor[1] + sy * self._screen[1] * gain)
+        w_b, h_b = self._screen
+        return max(0, min(nx, w_b - 1)), max(0, min(ny, h_b - 1))
 
     def _move_pointer(self, x, y):
         """Move the cursor with EMA smoothing so it does not shake."""
@@ -573,10 +631,16 @@ class HandCursorEngine:
             self._send("hand_size", round(hand_size, 3))
 
         tip = lm[INDEX_TIP]
-        x, y = self._to_screen(tip)
+        if self._driver_mode == "touchpad":
+            x, y = self._touchpad_next(lm)
+        else:
+            x, y = self._to_screen(tip)
 
         # ---- 1) Reach gate: only control the cursor near the screen --------
-        if not self._arm_if_needed(hand_size):
+        # (touchpad mode skips the gate - it is relative/ms-like on purpose,
+        #  so the pointer follows your hand as long as it stays in frame.)
+        if self._driver_mode != "touchpad" and not self._arm_if_needed(
+                hand_size):
             self._release_button()
             self._release_button(right=True)
             self._candidate = None

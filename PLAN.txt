@@ -5,18 +5,18 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v5.3 works end-to-end (voice, waveform UI, timers, clipboard history,
+STATUS: v5.4 works end-to-end (voice, waveform UI, timers, clipboard history,
 screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
 log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
 live tuning, chained commands, wake word aliases, timer toast popups,
 clipboard manager GUI card, live calibration size feedback, gesture trainer
 window, system tray + minimize-to-tray + global hotkey restore, draw-macro
-gestures that trigger actions).
+gestures that trigger actions, and a touchpad/relative-mouse hand mode).
 
 ------------------------------------------------------------------------------
-1) CURRENT ARCHITECTURE (v5.3)
+1) CURRENT ARCHITECTURE (v5.4)
 -------------------------------------------------------------------------------
-- voice_app.py   ~3400 lines : tkinter GUI + controller.
+- voice_app.py   ~3500 lines : tkinter GUI + controller.
   Threads:  "stt"    (speech -> text, Google Web API)
             "tts"    (pyttsx3 speak queue)
             "timers" (reminder fire loop)
@@ -37,6 +37,11 @@ Command branches: app launch, browser, window, system keys, volume,
    site shortcuts, power, autostart, gestures, "open app", Gemini Q&A.
    TTS profiles (voice + Speed slider), click-beep toggles, autostart
    checkbox. Every log line is also written to voc_log.txt (capped).
+   v5.4: TOUCHPAD - TOUCHPAD button (or voice "touchpad mode") switches the
+   engine to a RELATIVE mouse: the pointer follows accumulated hand-center
+   deltas, like a laptop trackpad, so it never teleports and feels like a
+   mouse. Same gestures; reach gate skipped on purpose. Mutually exclusive
+   with draw-macros. Config: touchpad_mode, touchpad_gain.
    v5.3: DRAW MACROS - button (or voice "draw macros") switches the hand
    engine to macro mode; a $1-style recognizer classifies the fingertip
    stroke (circle, v, check, l, s, z, w, line, slash) when the finger
@@ -58,6 +63,10 @@ Command branches: app launch, browser, window, system keys, volume,
         finger panel keep working.
 
 - hand_cursor.py : MediaPipe hand engine (daemon thread).
+  v1.7: TOUCHPAD - driver mode "touchpad" = relative-mouse mapping via
+        accumulated hand-center (wrist+middle-MCP) deltas with EMA + noise
+        floor + per-frame clamp; gestures identical; _handle_landmarks
+        skips the reach gate in touchpad mode.
   v1.6+: DRAW MACROS (driver mode "macros", $1-style stroke recognizer;
          "mac" + "train" mode via set_mode/set_training); REACH GATE
          (set_reach_thresholds; live size events); hysteresis pinch and
@@ -100,7 +109,9 @@ PHASE C - SYSTEM DEEP INTEGRATION (Windows)
 
 PHASE D - GESTURE X / PRODUCTISATION
   [ ] Two-hand support (left = pointer, right = modifiers).
-  [ ] Virtual touchpad mode: hand mapped to a trackpad region.
+  [x] Virtual touchpad mode: hand mapped to a trackpad region.
+      TOUCHPAD mode (v5.4): relative-mouse pointer via hand-center deltas;
+      button + voice command; mutually exclusive with macros.
   [x] Gesture macros: draw a letter/shape to trigger app actions.
       Circle/V/check/L/S/Z/W/line/slash -> lock screen, new tab, copy,
       minimize, settings, close tab, play or pause, mute, maximize.
@@ -121,7 +132,8 @@ PHASE D - GESTURE X / PRODUCTISATION
 
 -----------------------------------------------------------------------------
 4) NEXT SHIPMENT (playbook for continuing)
-  1. Phase D first items: two-hand support or virtual touchpad mode.
-  2. Run full smoke suite (py_compile + test_v53.py), update QUICK_START.txt
+  1. Phase D: two-hand support (primary pointer + modifier hand).
+  2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
+  3. Run full smoke suite (py_compile + test_v54.py), update QUICK_START.txt
      + this PLAN, then git add -A && commit && push to origin/main.
 ===============================================================================

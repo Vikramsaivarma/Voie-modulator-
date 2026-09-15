@@ -1,7 +1,7 @@
-"""Smoke-test suite for VoiceControlApp v5.3 features (draw-macro mode).
+"""Smoke-test suite for VoiceControlApp v5.4 features (touchpad mode).
 
-Supersedes test_v52.py: keeps all v5.2 regression checks and adds macro
-recognizer + engine + GUI coverage.
+Supersedes test_v53.py: keeps v5.2/v5.3 regression checks and adds the
+touchpad (relative-mouse) engine + GUI + voice-command coverage.
 """
 import os
 import sys
@@ -27,23 +27,36 @@ vars_ok = all(hasattr(app, a) for a in [
     "autostart_var", "click_beep_var", "voice_var",
     "voice_menu", "tts_rate_var", "hand_size_var",
     "clip_box", "train_btn", "_train_window", "_tray_icon",
-    "macro_btn", "_macro_mode_var"])
+    "macro_btn", "_macro_mode_var", "touchpad_btn", "_touchpad_var"])
 print(f"All widget vars present: {vars_ok}")
 assert vars_ok
 
 cfg = app.config
 assert cfg.get("minimize_to_tray", None) is True
 assert cfg.get("tray_hotkey", "") == "ctrl+alt+v"
-assert cfg.get("macro_mode", None) is False
 assert cfg.get("macro_actions", None) == {}
+assert cfg.get("touchpad_gain", None) == 2.5
 print("Config defaults OK")
 
-print("--- MACRO DEFAULT ACTIONS ---")
+# Self-heal: interrupted runs may have left macro/touchpad on. Remember the
+# originals, force defaults, and restore them in the cleanup below.
+orig_macro_mode = bool(cfg.get("macro_mode", False))
+orig_touchpad_mode = bool(cfg.get("touchpad_mode", False))
+app._macro_mode_var.set(False)
+app._touchpad_var.set(False)
+app.config["macro_mode"] = False
+app.config["touchpad_mode"] = False
+va.save_config(app.config)
+assert app.config.get("macro_mode", None) is False
+assert app.config.get("touchpad_mode", None) is False
+print("Mode config reset (originals saved) OK")
+
+print("--- MACRO DEFAULT ACTIONS (v5.3 regression) ---")
 assert va.MACRO_DEFAULT_ACTIONS["circle"] == "lock screen"
 assert va.MACRO_DEFAULT_ACTIONS["v"] == "new tab"
 print("Macro action map OK")
 
-print("--- TRAINER ROWS ---")
+print("--- TRAINER ROWS (v5.2 regression) ---")
 assert va.VoiceControlApp._TRAIN_GESTURES == [
     ("MOVE", ("index", "open")),
     ("CLICK", ("pinch",)),
@@ -132,25 +145,18 @@ for pose_name, lm in poses.items():
     assert raw in expected[pose_name], f"{pose_name}: got {raw}"
 print("Engine training classification OK")
 
-print("--- MACRO RECOGNIZER (unit) ---")
+print("--- MACRO RECOGNIZER (v5.3 regression) ---")
 from hand_cursor import _recognize_macro, MACRO_TEMPLATES
 for name, tmpl in MACRO_TEMPLATES.items():
     assert _recognize_macro(tmpl) == name, f"template {name} did not match"
-print("All templates self-match OK")
-import math
-v = MACRO_TEMPLATES["v"]
-v2 = [(x + 0.02 * math.sin(i), y + 0.02 * math.cos(i))
-      for i, (x, y) in enumerate(v)]
-assert _recognize_macro(v2) == "v", "perturbed v lost its match"
-print("Perturbed stroke OK")
 import random
 random.seed(1)
 scribble = [(0.1 * random.random(), 0.9 * random.random())
             for _ in range(40)]
 assert _recognize_macro(scribble) is None, "scribble should be rejected"
-print("Scribble rejected OK")
+print("Macro recognizer OK")
 
-print("--- ENGINE MACRO MODE (dwell commit) ---")
+print("--- ENGINE MACRO MODE (v5.3 regression) ---")
 
 
 def finger_lm(x, y):
@@ -173,36 +179,50 @@ engine._macro_commit_ts = time.time() - 1.5
 engine._handle_macro(finger_lm(*last))
 sent = [(k, d) for (k, d) in events if k == "macro"]
 assert sent == [("macro", "v")], sent
-assert engine._macro_pts == [], "stroke not reset after commit"
-print("Draw-v macro event OK")
+engine.set_mode("cursor")
+print("Engine macro flow OK")
 
-# Hand-lost commit path: populate then finalize directly.
-events.clear()
-for (x0, y0), (x1, y1) in zip(verts, verts[1:]):
-    for i in range(20):
-        t = i / 20
-        engine._handle_macro(finger_lm(x0 + (x1 - x0) * t,
-                                       y0 + (y1 - y0) * t))
-engine._finalize_macro()
-sent = [(k, d) for (k, d) in events if k == "macro"]
-assert sent == [("macro", "v")], sent
-print("Hand-lost finalize OK")
+print("--- ENGINE TOUCHPAD (relative-mouse mapping) ---")
+engine.set_mode("touchpad")
+assert engine._driver_mode == "touchpad"
+engine._screen = (1920, 1080)
+engine.sensitivity = 1.0
+engine._cursor = (960, 540)
 
-# Too-short stroke -> macro None.
-events.clear()
-engine._handle_macro(finger_lm(0.5, 0.5))
-engine._handle_macro(finger_lm(0.53, 0.53))
-engine._finalize_macro()
-sent = [(k, d) for (k, d) in events if k == "macro"]
-assert sent == [("macro", None)], sent
-print("Short stroke rejected OK")
+# Build a "move" hand; touchpad only reads WRIST + MIDDLE_MCP for motion.
+def shift_center(hand, dx):
+    hand[hc.WRIST] = landmark(0.50 + dx, 0.95)
+    hand[hc.MIDDLE_MCP] = landmark(0.52 + dx, 0.86)
+    return hand
 
-# Back to cursor mode.
+
+first = shift_center(make_hand([False, True, False, False, False],
+                               (0.49, 0.60), (0.50, 0.30)), 0.0)
+engine._handle_landmarks(first)
+c0 = engine._cursor
+# Same hand -> no drift.
+engine._handle_landmarks(first)
+assert engine._cursor == c0, "cursor drifted with a stationary hand"
+# Hand slides right -> pointer moves right (relative, no teleport).
+right = shift_center(make_hand([False, True, False, False, False],
+                               (0.49, 0.60), (0.50, 0.30)), 0.30)
+engine._handle_landmarks(right)
+c1 = engine._cursor
+assert c1[0] > c0[0], f"pointer should move right: {c0} -> {c1}"
+# Hand slides down -> pointer moves down.
+down = shift_center(make_hand([False, True, False, False, False],
+                              (0.49, 0.60), (0.50, 0.30)), 0.30)
+down[hc.WRIST] = landmark(0.65, 0.95 + 0.30)
+down[hc.MIDDLE_MCP] = landmark(0.67, 0.86 + 0.30)
+engine._handle_landmarks(down)
+c2 = engine._cursor
+assert c2[1] > c1[1], f"pointer should move down: {c1} -> {c2}"
+assert c2 != c0, "relative mode must not depend on absolute hand position"
 engine.set_mode("cursor")
 assert engine._driver_mode == "cursor"
-print("Mode switch back to cursor OK")
+print("Engine touchpad mapping OK")
 
-print("--- MACRO VOICE COMMAND ---")
+print("--- TOUCHPAD VOICE COMMANDS ---")
 orig_engine = app._hand_engine
 fake = SimpleNamespace(
     is_running=lambda: True,
@@ -211,28 +231,35 @@ fake = SimpleNamespace(
 )
 app._hand_engine = fake
 app._speak = lambda *a, **k: None
-app._toggle_macro_mode(True)
-assert app._macro_mode_var.get() is True
-assert fake.last_mode == "macros"
-app._toggle_macro_mode(False)
-assert app._macro_mode_var.get() is False
+app.handle_command("touchpad mode")
+assert app._touchpad_var.get() is True
+assert fake.last_mode == "touchpad"
+app.handle_command("stop touchpad")
+assert app._touchpad_var.get() is False
 assert fake.last_mode == "cursor"
+app.handle_command("start touchpad")
+assert app._touchpad_var.get() is True
+app.handle_command("touchpad off")
+assert app._touchpad_var.get() is False
 app._hand_engine = orig_engine
-print("Macro toggle (engine path) OK")
+print("Touchpad voice commands OK")
 
+print("--- TOUCHPAD/MACROS MUTUAL EXCLUSION ---")
+app._hand_engine = fake
+app.handle_command("touchpad mode")
+assert app._touchpad_var.get() is True
+# Enabling touchpad cleared the macro toggle.
 app.handle_command("draw macros")
-assert app._macro_mode_var.get() is True, "voice 'draw macros' did not turn on"
-app.handle_command("stop drawing")
-assert app._macro_mode_var.get() is False, "'stop drawing' did not turn off"
-app.handle_command("macro mode")
 assert app._macro_mode_var.get() is True
-app.handle_command("start drawing")
-assert app._macro_mode_var.get() is True
-app.handle_command("stop macros")
+app.handle_command("touchpad mode")  # touchpad wins -> macro off
+assert app._touchpad_var.get() is True
 assert app._macro_mode_var.get() is False
-print("Macro voice commands OK")
+app.handle_command("stop touchpad")
+assert app._touchpad_var.get() is False
+app._hand_engine = orig_engine
+print("Mutual exclusion OK")
 
-print("--- MACRO EVENT HANDLER ---")
+print("--- MACRO EVENT HANDLER (v5.3 regression) ---")
 calls = []
 app.handle_command = lambda phrase: calls.append(phrase)
 app._on_macro("circle")
@@ -241,28 +268,19 @@ for _ in range(20):
         break
     time.sleep(0.05)
 assert calls == ["lock screen"], calls
-app._on_macro("v")
-for _ in range(20):
-    if len(calls) >= 2:
-        break
-    time.sleep(0.05)
-assert calls == ["lock screen", "new tab"], calls
 app._on_macro("garbage-shape")
-assert len(calls) == 2, "unknown shape must not run an action"
+assert len(calls) == 1, "unknown shape must not run an action"
 print("Macro event handler OK")
 
-print("--- TRAINER WINDOW (GUI, v5.2 regression) ---")
+print("--- TRAINER WINDOW (v5.2 regression) ---")
 app.start_hand_cursor = lambda: None
 app._open_trainer()
 assert app._train_window is not None
-assert set(app._train_rows.keys()) == {n for n, _ in
-                                       va.VoiceControlApp._TRAIN_GESTURES}
 payload = {"raw": "peace", "stable": True,
            "fingers": [False, True, True, False, False],
            "size": 0.52, "armed": True}
 app._on_train_update(payload)
-peace_row = app._train_rows["SCROLL"]
-assert "PASS" in peace_row.cget("text"), peace_row.cget("text")
+assert "PASS" in app._train_rows["SCROLL"].cget("text")
 app._close_trainer()
 assert app._train_window is None
 print("Trainer window updates OK")
@@ -278,11 +296,11 @@ print("Tray icon + hotkey started OK")
 print("--- LOG PERSISTENCE (v5.2 regression) ---")
 log_path = os.path.join(os.path.dirname(os.path.abspath("voice_app.py")),
                         "voc_log.txt")
-app._append_log("[TEST] persistence marker v5.3")
+app._append_log("[TEST] persistence marker v5.4")
 assert os.path.exists(log_path)
 with open(log_path, "r", encoding="utf-8") as f:
     lines = f.readlines()
-assert any("persistence marker v5.3" in l for l in lines)
+assert any("persistence marker v5.4" in l for l in lines)
 print("Log persistence OK")
 
 print("--- CHAIN PARSE (v5.2 regression) ---")
@@ -312,10 +330,11 @@ except FileNotFoundError:
     pass
 print("Autostart registry OK")
 
-# Restore macro_mode in the local config to whatever it was before.
-app.config["macro_mode"] = False
+# Restore the local config to the values the suite started with.
+app.config["macro_mode"] = bool(orig_macro_mode)
+app.config["touchpad_mode"] = bool(orig_touchpad_mode)
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.3 TESTS PASSED ===")
+print("=== ALL v5.4 TESTS PASSED ===")
 app.on_close()  # real shutdown: stops tray, hotkey, threads

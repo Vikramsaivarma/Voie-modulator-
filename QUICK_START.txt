@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v5.3)
+VOICE CONTROL - QUICK START GUIDE  (v5.4)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -13,7 +13,8 @@ card), CHAINED COMMANDS ("open chrome then search weather"), WAKE WORD
 ("hey vo"), SYSTEM TRAY icon with minimize-to-tray and a global hotkey
 (ctrl+alt+v) to bring the window back, a GESTURE TRAINER window with live
 pass/fail feedback for every hand pose, DRAW-MACRO GESTURES that run
-actions by tracing shapes in the air, AUTO-BEST microphone selection,
+actions by tracing shapes in the air, a TOUCHPAD/RELATIVE-MOUSE mode
+for fine cursor control, AUTO-BEST microphone selection,
 and a HAND-CURSOR air mouse: use your webcam to move the pointer and
 "touch" the screen with finger gestures (with a live 5-finger state panel
 on the preview).
@@ -185,6 +186,13 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
         slash  = maximize
       Say "draw macros" / "stop macros" to toggle by voice, or press the
       DRAW MACROS button.
+      TOUCHPAD -> relative-mouse mode (like a laptop trackpad). The pointer
+      follows your hand MOVEMENT, not its absolute spot on the camera, so
+      you get smooth mouse-like control with no hand/wall mapping to fight.
+      Same gestures apply: pinch = click, peace = scroll, 3 fingers =
+      right click, fist = drag. Say "touchpad mode" / "stop touchpad" by
+      voice, or press the TOUCHPAD button. Touchpad and Draw-macros are
+      mutually exclusive (the last one enabled wins).
 
   * RAISE-GATED cursor (v1.5): the cursor only controls the mouse while your
     hand is CLOSE to the screen. Rest your hand on your lap or near the
@@ -222,6 +230,8 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     macro_mode          true/false = start the hand engine in DRAW-MACRO mode
     macro_actions       object of shape->action overrides, e.g.
                         {"circle": "shut down the computer"}
+    touchpad_mode       true/false = start the hand engine in TOUCHPAD mode
+    touchpad_gain       relative-motion speed multiplier (default 2.5)
 
 -------------------------------------------------------------------------------
 7) VOICE COMMANDS
@@ -280,6 +290,8 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     "Close gesture trainer" / "Stop trainer"
     "Draw macros" / "Macro mode"  -> hand engine draws shapes as actions
     "Stop macros" / "Macros off" / "Stop drawing"  -> back to cursor
+    "Touchpad mode" / "Start touchpad" -> relative mouse / trackpad mode
+    "Stop touchpad" / "Touchpad off"   -> back to reach-gated cursor
     "Help"             -> app reads the command list aloud
     "Quit" / "Exit"    -> closes the app
 
@@ -373,7 +385,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
-  test_v53.py         Dev-only smoke test suite for the v5.3 features
+  test_v54.py         Dev-only smoke test suite for the v5.4 features
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!

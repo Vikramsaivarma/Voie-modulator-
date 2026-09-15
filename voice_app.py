@@ -47,6 +47,12 @@
  * GESTURE TRAINER (v5.2): press TRAIN GESTURES (or say "train gestures")
    for a live pass/fail panel of every pose. While it is open the mouse
    is paused and each gesture lights up green once your hand holds it.
+  * TOUCHPAD MODE (v5.4): press TOUCHPAD (or say "touchpad mode") to turn
+   the hand into a RELATIVE mouse / laptop trackpad - the pointer follows
+   hand movement, not absolute position, so you get fine mouse-like
+   control. Same gestures (pinch=click, peace=scroll, 3 fingers=right
+   click, fist=drag). Say "stop touchpad" to go back to the reach-gated
+   cursor.
   * DRAW MACROS (v5.3): press DRAW MACROS (or say "draw macros") and trace
    a shape in the air with your index finger - the stroke is recognised
    when the finger stops for ~1 s or leaves the frame, then the action
@@ -103,7 +109,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.3.0
+VERSION   : 5.4.0
 ================================================================================
 """
 
@@ -351,6 +357,8 @@ DEFAULT_CONFIG = {
     "tray_hotkey": "ctrl+alt+v",  # global hotkey to restore the window
     "macro_mode": False,        # True = hand engine starts in DRAW-MACRO mode
     "macro_actions": {},        # optional per-shape action overrides
+    "touchpad_mode": False,     # True = hand engine starts in TOUCHPAD mode
+    "touchpad_gain": 2.5,       # relative-motion speed multiplier
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -459,7 +467,10 @@ class VoiceControlApp:
         "move, pinch to click, three fingers for a right click, make a "
         "peace sign to scroll, and make a fist to drag. Say start hand "
         "cursor or stop hand cursor to switch it on or off, or train "
-        "gestures to open the live pass-and-fail practice window. You can "
+        "gestures to open the live pass-and-fail practice window. Say "
+        "touchpad mode to turn your hand into a relative mouse like a "
+        "laptop trackpad, and stop touchpad to go back to the reach-gated "
+        "cursor. You can "
         "also draw shapes in the air as macros: say draw macros, then "
         "trace a shape with your finger; a circle locks the screen, a "
         "letter v opens a new tab, a check mark copies, the letter l "
@@ -842,6 +853,18 @@ class VoiceControlApp:
         )
         self.macro_btn.pack(side=tk.LEFT, padx=(8, 0))
         self._paint_macro_btn()
+
+        self._touchpad_var = tk.BooleanVar(
+            value=bool(self.config.get("touchpad_mode", False)))
+        self.touchpad_btn = tk.Button(
+            hand_actions, text="TOUCHPAD",
+            font=(FONT_NAME, 7, "bold"), bg="#30363d", fg=MUTED,
+            activebackground="#484f58", activeforeground=FG_COLOR,
+            relief=tk.FLAT, padx=8, pady=1, cursor="hand2",
+            command=self._toggle_touchpad,
+        )
+        self.touchpad_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._paint_touchpad_btn()
 
         self.click_beep_var = tk.BooleanVar(
             value=bool(self.config.get("click_beep", True)))
@@ -2010,6 +2033,21 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 self._speak("Macro drawing mode turned off.")
             return
 
+        # ---- Touchpad mode (relative mouse / trackpad) ----------------------
+        tp_on = re.search(r"\b(touchpad|trackpad)", lowered) and \
+            re.search(r"\b(on|start|begin|enable|mode)\b", lowered)
+        tp_off = re.search(r"\b(touchpad|trackpad)", lowered) and \
+            re.search(r"\b(off|stop|disable|exit|end)\b", lowered)
+        if tp_on or tp_off:
+            if tp_on and not tp_off:
+                self._toggle_touchpad(True)
+                self._speak("Touchpad mode turned on. Move your hand like "
+                            "a mouse.")
+            else:
+                self._toggle_touchpad(False)
+                self._speak("Touchpad mode turned off.")
+            return
+
         # ---- Screen analysis via Gemini Vision ----------------------------
         if re.search(r"\b(analy[sz]e|scan|describe|read|what (is|are|do you "
                      r"see)|look at|show me)\b.*\bscreen\b", lowered) or \
@@ -2953,7 +2991,9 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             return
         self._hand_engine = engine
         engine.start()
-        if bool(self.config.get("macro_mode", False)):
+        if bool(self.config.get("touchpad_mode", False)):
+            engine.set_mode("touchpad")
+        elif bool(self.config.get("macro_mode", False)):
             engine.set_mode("macros")
 
     def stop_hand_cursor(self):
@@ -3036,6 +3076,12 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             on = bool(enable)
         else:
             on = not bool(self._macro_mode_var.get())
+        if on:
+            # Macros and touchpad are mutually exclusive; macros wins.
+            if self._touchpad_var.get():
+                self._touchpad_var.set(False)
+                self.config["touchpad_mode"] = False
+                self._paint_touchpad_btn()
         if on == bool(self._macro_mode_var.get()):
             return
         self._macro_mode_var.set(on)
@@ -3073,6 +3119,50 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                              args=(action,), daemon=True).start()
         else:
             self._append_log(f"Draw macro: {shape} (no action assigned)")
+
+    # ------------------------------------------------------------------
+    # TOUCHPAD mode (Phase D): hand = relative mouse / trackpad.
+    # ------------------------------------------------------------------
+    def _paint_touchpad_btn(self):
+        on = self._touchpad_var.get()
+        self.touchpad_btn.config(
+            text="TOUCHPAD: ON" if on else "TOUCHPAD",
+            fg=("#54aeff" if on else MUTED))
+
+    def _toggle_touchpad(self, enable=None):
+        """Turn touchpad/relative-mouse mode on or off (mutually exclusive
+        with draw-macros mode)."""
+        if enable is not None:
+            on = bool(enable)
+        else:
+            on = not bool(self._touchpad_var.get())
+        if on:
+            # Touchpad and macros are mutually exclusive; touchpad wins.
+            if self._macro_mode_var.get():
+                self._macro_mode_var.set(False)
+                self.config["macro_mode"] = False
+                self._paint_macro_btn()
+        if on == bool(self._touchpad_var.get()):
+            return
+        on = bool(on)
+        self._touchpad_var.set(on)
+        self.config["touchpad_mode"] = on
+        save_config(self.config)
+        self._paint_touchpad_btn()
+        engine = getattr(self, "_hand_engine", None)
+        if engine is not None and engine.is_running():
+            if on:
+                engine.set_training(False)
+                if self._train_window is not None:
+                    self._close_trainer()
+            engine.set_mode("touchpad" if on else "cursor")
+            self._append_log(
+                "Touchpad: mode ON - move your hand like a mouse; pinch "
+                "click, peace scroll, 3 fingers right-click, fist drag."
+                if on else "Touchpad: mode OFF - back to absolute cursor.")
+        elif on:
+            self._append_log("Touchpad: turn ON the Hand Cursor first "
+                             "(Start Hand Cursor, or say 'start hand cursor').")
 
     # ------------------------------------------------------------------
     # Gesture trainer window
