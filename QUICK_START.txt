@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v5.2)
+VOICE CONTROL - QUICK START GUIDE  (v5.3)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -12,7 +12,8 @@ REMINDERS (with toast popups), CLIPBOARD HISTORY (with a click-to-paste
 card), CHAINED COMMANDS ("open chrome then search weather"), WAKE WORD
 ("hey vo"), SYSTEM TRAY icon with minimize-to-tray and a global hotkey
 (ctrl+alt+v) to bring the window back, a GESTURE TRAINER window with live
-pass/fail feedback for every hand pose, AUTO-BEST microphone selection,
+pass/fail feedback for every hand pose, DRAW-MACRO GESTURES that run
+actions by tracing shapes in the air, AUTO-BEST microphone selection,
 and a HAND-CURSOR air mouse: use your webcam to move the pointer and
 "touch" the screen with finger gestures (with a live 5-finger state panel
 on the preview).
@@ -172,6 +173,18 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
       While it runs, a live readout next to the button shows your current
       hand size and which pose is being measured: "size 0.31 (REST)" or
       "size 0.52 (REACH)".
+      DRAW MACROS -> toggles the hand engine into macro drawing mode. While
+      ON, move your index finger in the air to draw a shape; when you stop
+      moving for about 1 second or your hand leaves the camera view, the
+      shape is recognised and its mapped action runs like a voice command.
+      Shapes and their default actions (remappable via macro_actions config):
+        circle = lock screen       v     = new tab
+        check  = copy              l     = minimize
+        s      = open settings     z     = close tab
+        w      = play or pause     line  = mute
+        slash  = maximize
+      Say "draw macros" / "stop macros" to toggle by voice, or press the
+      DRAW MACROS button.
 
   * RAISE-GATED cursor (v1.5): the cursor only controls the mouse while your
     hand is CLOSE to the screen. Rest your hand on your lap or near the
@@ -206,6 +219,9 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     minimize_to_tray    true/false = X hides to tray ("" still quits if no tray)
     tray_hotkey         global key combo that restores the window (default
                         ctrl+alt+v; empty disables the hotkey)
+    macro_mode          true/false = start the hand engine in DRAW-MACRO mode
+    macro_actions       object of shape->action overrides, e.g.
+                        {"circle": "shut down the computer"}
 
 -------------------------------------------------------------------------------
 7) VOICE COMMANDS
@@ -262,6 +278,8 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     "Start Hand Cursor" / "Stop Hand Cursor"  -> air mouse on/off
     "Train Gestures" / "Open trainer"  -> gesture practice window
     "Close gesture trainer" / "Stop trainer"
+    "Draw macros" / "Macro mode"  -> hand engine draws shapes as actions
+    "Stop macros" / "Macros off" / "Stop drawing"  -> back to cursor
     "Help"             -> app reads the command list aloud
     "Quit" / "Exit"    -> closes the app
 
@@ -355,7 +373,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
-  test_v52.py         Dev-only smoke test suite for the v5.2 features
+  test_v53.py         Dev-only smoke test suite for the v5.3 features
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!

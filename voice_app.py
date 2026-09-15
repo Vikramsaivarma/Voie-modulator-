@@ -47,6 +47,12 @@
  * GESTURE TRAINER (v5.2): press TRAIN GESTURES (or say "train gestures")
    for a live pass/fail panel of every pose. While it is open the mouse
    is paused and each gesture lights up green once your hand holds it.
+  * DRAW MACROS (v5.3): press DRAW MACROS (or say "draw macros") and trace
+   a shape in the air with your index finger - the stroke is recognised
+   when the finger stops for ~1 s or leaves the frame, then the action
+   fires. Shapes (remappable via the macro_actions config): circle=lock
+   screen, v=new tab, check=copy, l=minimize, s=open settings, z=close
+   tab, w=play or pause, line=mute, slash=maximize.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -97,7 +103,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.2.0
+VERSION   : 5.3.0
 ================================================================================
 """
 
@@ -141,11 +147,13 @@ except ImportError:
 # optional: the voice app still runs if MediaPipe/Pillow are not installed.
 try:
     from hand_cursor import (HAND_DEPS_OK, HandCursorEngine, bgr_frame_to_pil,
-                             available_cameras, FINGER_NAMES)
+                             available_cameras, FINGER_NAMES,
+                             MACRO_DEFAULT_ACTIONS)
 except ImportError:
     HAND_DEPS_OK = False
     HandCursorEngine = bgr_frame_to_pil = available_cameras = None
     FINGER_NAMES = ("T", "I", "M", "R", "P")
+    MACRO_DEFAULT_ACTIONS = {}
 
 try:
     from PIL import ImageTk
@@ -341,6 +349,8 @@ DEFAULT_CONFIG = {
     "voice_id": "",             # "" = default SAPI5 voice; set by dropdown
     "minimize_to_tray": True,   # X button hides to tray instead of quitting
     "tray_hotkey": "ctrl+alt+v",  # global hotkey to restore the window
+    "macro_mode": False,        # True = hand engine starts in DRAW-MACRO mode
+    "macro_actions": {},        # optional per-shape action overrides
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -449,7 +459,12 @@ class VoiceControlApp:
         "move, pinch to click, three fingers for a right click, make a "
         "peace sign to scroll, and make a fist to drag. Say start hand "
         "cursor or stop hand cursor to switch it on or off, or train "
-        "gestures to open the live pass-and-fail practice window. "
+        "gestures to open the live pass-and-fail practice window. You can "
+        "also draw shapes in the air as macros: say draw macros, then "
+        "trace a shape with your finger; a circle locks the screen, a "
+        "letter v opens a new tab, a check mark copies, the letter l "
+        "minimizes, an s opens settings, a z closes the tab, a w plays or "
+        "pauses, a straight line mutes, and a slash maximizes. "
         "Confirmations are audible when click beep sounds are enabled."
     )
 
@@ -815,6 +830,18 @@ class VoiceControlApp:
             command=self._open_trainer,
         )
         self.train_btn.pack(side=tk.LEFT)
+
+        self._macro_mode_var = tk.BooleanVar(
+            value=bool(self.config.get("macro_mode", False)))
+        self.macro_btn = tk.Button(
+            hand_actions, text="DRAW MACROS",
+            font=(FONT_NAME, 7, "bold"), bg="#30363d", fg=MUTED,
+            activebackground="#484f58", activeforeground=FG_COLOR,
+            relief=tk.FLAT, padx=8, pady=1, cursor="hand2",
+            command=self._toggle_macro_mode,
+        )
+        self.macro_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._paint_macro_btn()
 
         self.click_beep_var = tk.BooleanVar(
             value=bool(self.config.get("click_beep", True)))
@@ -1197,6 +1224,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                     self._play_beep(data)
                 elif kind == "train":
                     self._on_train_update(data)
+                elif kind == "macro":
+                    self._on_macro(data)
                 elif kind == "tts_voices":
                     self._populate_voice_menu(data)
                 elif kind == "quit":
@@ -1961,6 +1990,24 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 self._open_trainer()
                 self._post("log", "[i] Opening gesture trainer.")
                 self._speak("Opening the gesture trainer.")
+            return
+
+        # ---- Draw macros (trace a shape in the air) ------------------------
+        mac_on = re.search(r"\b(draw macros?|draw mode|drawing mode|"
+                           r"macros? mode|start draw(ing)?|enable macros?|"
+                           r"turn (macros?|macro mode|drawing) on)\b",
+                           lowered)
+        mac_off = re.search(r"\b(stop macros?|macros? off|disable macros?|"
+                            r"stop drawing|exit macros?|close macros?|"
+                            r"turn (macros?|macro mode|drawing) off)\b",
+                            lowered)
+        if mac_on or mac_off:
+            if mac_on and not mac_off:
+                self._toggle_macro_mode(True)
+                self._speak("Macro drawing mode turned on.")
+            else:
+                self._toggle_macro_mode(False)
+                self._speak("Macro drawing mode turned off.")
             return
 
         # ---- Screen analysis via Gemini Vision ----------------------------
@@ -2906,6 +2953,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             return
         self._hand_engine = engine
         engine.start()
+        if bool(self.config.get("macro_mode", False)):
+            engine.set_mode("macros")
 
     def stop_hand_cursor(self):
         """Stop the engine; the 'stopped' event resets the GUI. Thread-safe."""
@@ -2969,6 +3018,61 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             if not self._preview_warning_done:
                 self._preview_warning_done = True
                 self._append_log(f"[!] Camera preview unavailable: {exc}")
+
+    # ------------------------------------------------------------------
+    # Gesture trainer window
+    # ------------------------------------------------------------------
+    # DRAW-MACRO mode (Phase D): trace a shape in the air to act.
+    # ------------------------------------------------------------------
+    def _paint_macro_btn(self):
+        on = self._macro_mode_var.get()
+        self.macro_btn.config(
+            text="DRAW MACROS: ON" if on else "DRAW MACROS",
+            fg=("#54aeff" if on else MUTED))
+
+    def _toggle_macro_mode(self, enable=None):
+        """Turn the hand engine's driver mode on/off (cursor vs macros)."""
+        if enable is not None:
+            on = bool(enable)
+        else:
+            on = not bool(self._macro_mode_var.get())
+        if on == bool(self._macro_mode_var.get()):
+            return
+        self._macro_mode_var.set(on)
+        self.config["macro_mode"] = on
+        save_config(self.config)
+        self._paint_macro_btn()
+        engine = getattr(self, "_hand_engine", None)
+        if engine is not None and engine.is_running():
+            if on:
+                engine.set_training(False)
+                if self._train_window is not None:
+                    self._close_trainer()
+            engine.set_mode("macros" if on else "cursor")
+            self._append_log("Draw macros: mode ON - trace a shape in the "
+                             "air; the stroke is recognised when the finger "
+                             "stops for ~1 s or leaves the frame."
+                             if on else "Draw macros: mode OFF - back to "
+                             "cursor control.")
+        elif on:
+            self._append_log("Draw macros: turn ON the Hand Cursor first "
+                             "(Start Hand Cursor, or say 'start hand cursor').")
+
+    def _on_macro(self, shape):
+        """Apply a recognised draw-macro: log it and run its action."""
+        if not shape:
+            self._append_log("Draw macro: shape not recognised - try again. "
+                             "Circle, V, check, L, S, Z, W, line, slash.")
+            return
+        actions = dict(MACRO_DEFAULT_ACTIONS)
+        actions.update(self.config.get("macro_actions", {}) or {})
+        action = actions.get(shape)
+        if action:
+            self._append_log(f"Draw macro: {shape} -> {action}")
+            threading.Thread(target=self.handle_command,
+                             args=(action,), daemon=True).start()
+        else:
+            self._append_log(f"Draw macro: {shape} (no action assigned)")
 
     # ------------------------------------------------------------------
     # Gesture trainer window

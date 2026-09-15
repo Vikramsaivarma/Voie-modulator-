@@ -15,6 +15,13 @@
      A 5-finger panel on the preview overlay shows whether each finger
      (thumb, index, middle, ring, pinky) is currently extended.
 
+ DRAW-MACRO mode (v1.6)
+ ----------------------
+ When the driver mode is set to "macros", no mouse actions are performed.
+ Instead the index fingertip is tracked and a small $1-style recognizer
+ classifies the drawn stroke (circle, V, check, L, S, Z, W, line, slash)
+ and emits a ``('macro', name)`` event for the app to act on.
+
  ANTI-ACCIDENT DESIGN (v1.2)
  ---------------------------
  A pose is only trusted after it has been observed for several consecutive
@@ -36,7 +43,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.5.0
+ VERSION   : 1.6.0
 ==============================================================================
 """
 
@@ -113,9 +120,129 @@ PREVIEW_FPS  = 15
 # State-line updates per second shown in the GUI status label.
 STATE_FPS    = 8
 
+# ----------------------------------------------------------------------
+# DRAW-MACRO mode ("draw a shape in the air to trigger an action").
+# A small $1-style single-stroke recognizer normalises the fingertip path
+# (resample -> offset to origin -> scale into a 0..1 box) and matches it
+# against the templates with a cosine-distance threshold.
+# ----------------------------------------------------------------------
+MACRO_TEMPLATES = {  # name -> list of (x, y) in a 0..1 box (normalised)
+    "circle": [(0.5 + 0.45 * math.cos(-math.pi / 2 + 2 * math.pi * k / 16),
+                0.5 + 0.45 * math.sin(-math.pi / 2 + 2 * math.pi * k / 16))
+               for k in range(16)],
+    "v":      [(0.2, 0.10), (0.3, 0.35), (0.5, 0.90),
+               (0.65, 0.45), (0.80, 0.10)],
+    "check":  [(0.20, 0.75), (0.35, 0.45), (0.50, 0.25), (0.80, 0.10)],
+    "l":      [(0.25, 0.10), (0.25, 0.90), (0.80, 0.90)],
+    "s":      [(0.80, 0.15), (0.25, 0.35), (0.80, 0.55), (0.25, 0.85)],
+    "z":      [(0.20, 0.15), (0.80, 0.15), (0.20, 0.85), (0.80, 0.85)],
+    "w":      [(0.10, 0.15), (0.30, 0.85), (0.50, 0.30),
+               (0.70, 0.85), (0.90, 0.15)],
+    "line":   [(0.10, 0.50), (0.50, 0.50), (0.90, 0.50)],
+    "slash":  [(0.15, 0.85), (0.50, 0.50), (0.85, 0.15)],
+}
+
+# Default actions for each recognised shape (sent to the app, which runs
+# them like a voice command). Users can override via macro_actions config.
+MACRO_DEFAULT_ACTIONS = {
+    "circle": "lock screen",
+    "v":      "new tab",
+    "check":  "copy",
+    "l":      "minimize",
+    "s":      "open settings",
+    "z":      "close tab",
+    "w":      "play or pause",
+    "line":   "mute",
+    "slash":  "maximize",
+}
+
+# Drawing pipeline numbers: minimum points to consider a stroke, minimum
+# travel between stored samples (normalised units), and how long the finger
+# must stay still before the stroke is "committed" (seconds).
+MACRO_MIN_POINTS = 12
+MACRO_SAMPLE_GAP = 0.025
+MACRO_COMMIT_TIME = 1.0
+# Match below this average per-point distance wins; otherwise "unknown".
+MACRO_MATCH_MAX = 0.22
+
 
 def _norm_dist(a, b):
     return math.hypot(a.x - b.x, a.y - b.y)
+
+
+# ----------------------------------------------------------------------
+# $1-style stroke helpers for DRAW-MACRO mode. Paths are plain (x, y)
+# tuples in normalised image space (0..1).
+# ----------------------------------------------------------------------
+def _macro_path_len(path):
+    return sum(math.hypot(path[i][0] - path[i - 1][0],
+                          path[i][1] - path[i - 1][1])
+               for i in range(1, len(path)))
+
+
+def _macro_resample(path, n=32):
+    """Evenly re-space a stroke so point count does not affect matching."""
+    if len(path) < 2:
+        return list(path)
+    total = _macro_path_len(path)
+    if total <= 1e-9:
+        return [path[0]] * n
+    step = total / (n - 1)
+    out = [path[0]]
+    d = 0.0
+    i = 1
+    while i < len(path) and len(out) < n:
+        seg = math.hypot(path[i][0] - path[i - 1][0],
+                         path[i][1] - path[i - 1][1])
+        if seg <= 1e-9:
+            i += 1
+            continue
+        if d + seg >= step:
+            t = (step - d) / seg
+            x = path[i - 1][0] + (path[i][0] - path[i - 1][0]) * t
+            y = path[i - 1][1] + (path[i][1] - path[i - 1][1]) * t
+            out.append((x, y))
+            path = path[:i] + [(x, y)] + path[i:]
+            d = 0.0
+        else:
+            d += seg
+        i += 1
+    while len(out) < n:
+        out.append(out[-1])
+    return out[:n]
+
+
+def _macro_normalize(path):
+    """Translate to the origin then scale into a 0..1 box (aspect kept)."""
+    if not path:
+        return []
+    xs = [p[0] for p in path]
+    ys = [p[1] for p in path]
+    minx, miny = min(xs), min(ys)
+    span = max(max(xs) - minx, max(ys) - miny)
+    if span <= 1e-9:
+        return [(0.0, 0.0)] * len(path)
+    return [((x - minx) / span, (y - miny) / span) for x, y in path]
+
+
+def _macro_path_distance(a, b):
+    return sum(math.hypot(a[i][0] - b[i][0], a[i][1] - b[i][1])
+               for i in range(len(a))) / len(a)
+
+
+def _recognize_macro(path):
+    """Best template name for a stroke, or None if nothing is close enough."""
+    if len(path) < 2:
+        return None
+    norm = _macro_normalize(_macro_resample(path))
+    if not norm:
+        return None
+    best_name, best_d = None, 1e9
+    for name, tmpl in MACRO_TEMPLATES.items():
+        d = _macro_path_distance(norm, _macro_normalize(_macro_resample(tmpl)))
+        if d < best_d:
+            best_name, best_d = name, d
+    return best_name if best_d <= MACRO_MATCH_MAX else None
 
 
 def available_cameras(limit=6):
@@ -193,6 +320,11 @@ class HandCursorEngine:
         self._drag_beeped = False    # left-click beeped at drag start
         self._right_drag_beeped = False  # right-click beeped at drag start
         self.training = False          # gesture trainer mode (no mouse driving)
+        self._driver_mode = "cursor"   # "cursor" | "macros"
+        self._macro_pts = []           # stroke points collected during draw
+        self._macro_last_ts = 0.0      # timestamp of last stored sample
+        self._macro_last_pt = None     # last stored (x, y)
+        self._macro_commit_ts = 0.0    # when the finger stopped moving
 
     # ------------------------------------------------------------------
     # Public control API
@@ -237,6 +369,22 @@ class HandCursorEngine:
         if self.training:
             self._release_button()
             self._release_button(right=True)
+
+    def set_mode(self, mode):
+        """Switch driver mode: ``'cursor'`` (default) or ``'macros'``."""
+        if mode not in ("cursor", "macros"):
+            return
+        if mode == self._driver_mode:
+            return
+        self._driver_mode = mode
+        self._macro_pts.clear()
+        self._macro_commit_ts = 0.0
+        self._macro_last_pt = None
+        self._mode = None
+        if mode == "cursor":
+            self._send("log", "Mode: CURSOR")
+        else:
+            self._send("log", "Mode: DRAW MACROS - trace a shape in the air")
 
     def set_reach_thresholds(self, arm_size, disarm_size):
         """Apply a calibrated reach gate without restarting the engine.
@@ -527,6 +675,58 @@ class HandCursorEngine:
 
         return label, fingers
 
+    # ------------------------------------------------------------------
+    # DRAW-MACRO mode
+    # ------------------------------------------------------------------
+    def _handle_macro(self, lm):
+        """Collect fingertip path while the hand is present; when the finger
+        stops moving (or is lost) the stroke is classified and sent as a
+        ``('macro', name)`` or ``('macro', None)`` event.
+        """
+        now = time.time()
+        tip = lm[INDEX_TIP]
+        pt = (tip.x, tip.y)
+        label = "DRAW"
+        fingers = [1, 1, 0, 0, 0]  # placeholder shown on finger panel
+
+        # Store a new sample only if it has moved enough from the last one.
+        should_store = (
+            self._macro_last_pt is None
+            or math.hypot(pt[0] - self._macro_last_pt[0],
+                          pt[1] - self._macro_last_pt[1]) >= MACRO_SAMPLE_GAP
+        )
+        if should_store:
+            self._macro_pts.append(pt)
+            self._macro_last_pt = pt
+            self._macro_last_ts = now
+            self._macro_commit_ts = now
+        elif self._macro_last_pt is not None:
+            # Finger held still — check dwell to commit.
+            if (now - self._macro_commit_ts) >= MACRO_COMMIT_TIME:
+                self._finalize_macro()
+
+        # Also commit when the stroke gets suspiciously long.
+        if len(self._macro_pts) >= 500:
+            self._finalize_macro()
+
+        self._emit_state(label, fingers)
+        return label, fingers
+
+    def _finalize_macro(self):
+        """Run the recognizer on the accumulated stroke, emit the event."""
+        pts = self._macro_pts
+        if len(pts) >= MACRO_MIN_POINTS:
+            name = _recognize_macro(pts)
+            self._send("macro", name)
+            self._send("log", f"Draw macro: "
+                              f"{name if name else 'shape not recognised'}")
+        else:
+            self._send("macro", None)
+            self._send("log", "Draw macro: stroke too short")
+        self._macro_pts = []
+        self._macro_last_pt = None
+        self._macro_commit_ts = 0.0
+
     def _training_step(self, lm):
         """Gesture-trainer mode: classify but never move/click the mouse.
 
@@ -673,6 +873,8 @@ class HandCursorEngine:
                         landmark = results.multi_hand_landmarks[0].landmark
                         if self.training:
                             overlay_text, fingers = self._training_step(landmark)
+                        elif self._driver_mode == "macros":
+                            overlay_text, fingers = self._handle_macro(landmark)
                         else:
                             overlay_text, fingers = self._handle_landmarks(landmark)
                         landmarks = results.multi_hand_landmarks[0]
@@ -685,6 +887,8 @@ class HandCursorEngine:
                     if self._button_down or self._right_down:
                         self._release_button()
                         self._release_button(right=True)
+                    if self._driver_mode == "macros" and self._macro_pts:
+                        self._finalize_macro()
 
                 if (self.emit_preview and self.on_preview is not None and
                         time.time() - self._last_preview >= 1.0 / PREVIEW_FPS):
