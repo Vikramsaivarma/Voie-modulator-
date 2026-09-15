@@ -36,7 +36,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.2.0
+ VERSION   : 1.3.0
 ==============================================================================
 """
 
@@ -152,7 +152,8 @@ class HandCursorEngine:
     """
 
     def __init__(self, camera_index=0, sensitivity=1.0, scroll_speed=1.0,
-                 emit_preview=False, on_event=None, on_preview=None):
+                 emit_preview=False, on_event=None, on_preview=None,
+                 arm_size=None, disarm_size=None):
         if not HAND_DEPS_OK:
             raise RuntimeError("Hand-tracking packages are not installed.")
         self.camera_index = int(camera_index)
@@ -161,6 +162,8 @@ class HandCursorEngine:
         self.emit_preview = bool(emit_preview)
         self.on_event = on_event
         self.on_preview = on_preview
+        self._arm_size = float(arm_size) if arm_size else ARM_SIZE
+        self._disarm_size = float(disarm_size) if disarm_size else DISARM_SIZE
 
         self._running = threading.Event()
         self._thread = None
@@ -186,6 +189,7 @@ class HandCursorEngine:
         self._candidate_frames = 0   # consecutive frames for that pose
         self._pinch_engaged = False  # hysteresis latch for the pinch
         self._mode_since = 0.0       # when the current stable mode began
+        self._last_size_event = 0.0  # throttle for calibration size events
 
     # ------------------------------------------------------------------
     # Public control API
@@ -210,6 +214,27 @@ class HandCursorEngine:
 
     def set_emit_preview(self, flag):
         self.emit_preview = bool(flag)
+
+    def set_sensitivity(self, value):
+        """Live cursor-movement sensitivity (1.0 = full frame maps to screen)."""
+        self.sensitivity = max(0.1, float(value))
+
+    def set_scroll_speed(self, value):
+        """Live scroll gain while doing the peace sign."""
+        self.scroll_speed = max(0.1, float(value))
+
+    def set_reach_thresholds(self, arm_size, disarm_size):
+        """Apply a calibrated reach gate without restarting the engine.
+
+        arm_size must be bigger than disarm_size; both are normalised
+        hand-size values (0..1). If the values are impossible, they are
+        ignored so the engine never locks itself out.
+        """
+        arm = float(arm_size)
+        disarm = float(disarm_size)
+        if 0 < disarm < arm:
+            self._arm_size = arm
+            self._disarm_size = disarm
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -350,9 +375,9 @@ class HandCursorEngine:
     def _arm_if_needed(self, hand_size):
         """Update the reached-for-screen arming latch with hysteresis."""
         if self._armed:
-            if hand_size < DISARM_SIZE:
+            if hand_size < self._disarm_size:
                 self._armed = False
-        elif hand_size >= ARM_SIZE:
+        elif hand_size >= self._arm_size:
             self._armed = True
         return self._armed
 
@@ -373,6 +398,12 @@ class HandCursorEngine:
         ]
         n_up = sum(fingers)
         hand_size = self._hand_size_norm(lm)
+
+        # Emit throttled hand-size samples so the app can calibrate the
+        # reach gate without owning a frame counter.
+        if time.time() - self._last_size_event >= 1.0 / STATE_FPS:
+            self._last_size_event = time.time()
+            self._send("hand_size", round(hand_size, 3))
 
         tip = lm[INDEX_TIP]
         x, y = self._to_screen(tip)

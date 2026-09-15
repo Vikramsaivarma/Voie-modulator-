@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v4.0)
+VOICE CONTROL - QUICK START GUIDE  (v4.2)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -124,13 +124,26 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   3 fingers              RIGHT click / right-drag (context menus)
   Fist                   Hold the LEFT mouse button (drag/select)
 
+  * The HAND CURSOR row has live tuning controls:
+      Sens slider  -> pointer speed/mapping (1.0 = full frame, raise to zoom)
+      Scroll slider-> how fast the peace sign scrolls
+      CALIBRATE REACH -> two-phase wizard (rest your hand, then reach toward
+      the screen) that writes your personal ARM/DISARM reach thresholds into
+      voc_config.json so the cursor ignores a hand resting on your lap.
+
+  * RAISE-GATED cursor (v1.3): the cursor only controls the mouse while your
+    hand is CLOSE to the screen. Rest your hand on your lap or near the
+    keyboard and it does NOTHING - no ghost moves, no ghost clicks. Reach
+    toward the screen to arm it; bring it closer still to hover/click.
+
   * The live preview overlay shows a 5-finger panel (T I M R P - thumb,
     index, middle, ring, pinky) that turns green on each finger that is
     extended, so you always see what the app is reading.
 
   * Starts automatically when the app opens. Use START / STOP to switch.
   * Say "start hand cursor" or "stop hand cursor" to do it by voice.
-  * Pick the correct webcam with the "Cam:" dropdown if nothing moves.
+  * Pick the correct webcam with the "Cam:" dropdown (lists only cameras
+    that are actually available) if nothing moves.
   * Untick "Preview" to hide the small camera view and use less CPU.
   * Raise ONE hand facing the camera, about arm's length away. Silhouette
     it against your face/body for steadier tracking.
@@ -141,6 +154,8 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     camera_index        which webcam (0 = first)
     hand_sensitivity    zoom of the pointer mapping (1.0 = full screen)
     hand_scroll_speed   how fast the peace sign scrolls
+    hand_arm_size       reach-gate threshold from CALIBRATE (or None)
+    hand_disarm_size    reach-gate threshold from CALIBRATE (or None)
     hand_mode           "on" = webcam starts with the app, "off" = manual
 
 -------------------------------------------------------------------------------
@@ -176,6 +191,15 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     "Set a timer for 10 minutes"
     "Remind me in 5 minutes to take a break"
     "What did I copy"   /   "Show my clipboard"
+
+  UTILITIES (NEW in v4.2):
+    "What time is it"   /   "What date is it today"
+    "Take a note: buy milk"            -> appends to voc_notes.txt
+    "Calculate 15 percent of 240"      -> safe on-device math
+    "What is 12 times 8"   "How much is 2 to the power of 10"
+    "Open YouTube" "Open Gmail" "Open Google Drive" "Open Maps"
+    "Shut down the computer"   "Restart the computer"
+    "Put the computer to sleep"
 
   LIFECYCLE:
     "Stop Listening"   -> pauses; say "Start Listening" to resume
@@ -261,7 +285,9 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   requirements.txt    All Python dependencies (pinned working versions)
   install.bat         One-click installer / verifier
   QUICK_START.txt     You are reading it
+  PLAN.txt            Product roadmap for the next versions
   voc_config.json     Local settings + your Gemini API key (do not share)
+  voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!

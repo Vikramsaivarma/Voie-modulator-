@@ -69,7 +69,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 4.1.0
+VERSION   : 4.2.0
 ===============================================================================
 """
 
@@ -109,10 +109,11 @@ except ImportError:
 # Hand-gesture "air cursor" engine + camera preview support. These are kept
 # optional: the voice app still runs if MediaPipe/Pillow are not installed.
 try:
-    from hand_cursor import (HAND_DEPS_OK, HandCursorEngine, bgr_frame_to_pil)
+    from hand_cursor import (HAND_DEPS_OK, HandCursorEngine, bgr_frame_to_pil,
+                             available_cameras)
 except ImportError:
     HAND_DEPS_OK = False
-    HandCursorEngine = bgr_frame_to_pil = None
+    HandCursorEngine = bgr_frame_to_pil = available_cameras = None
 
 try:
     from PIL import ImageTk
@@ -280,6 +281,8 @@ DEFAULT_CONFIG = {
     "hand_sensitivity": 1.0,    # 1.0 = full frame maps to the screen
     "hand_scroll_speed": 1.0,   # wheel sensitivity while making a peace sign
     "show_preview": True,       # embed the camera view in the GUI
+    "hand_arm_size": None,      # None = default reach gate (auto-calibratable)
+    "hand_disarm_size": None,   # None = default reach gate (auto-calibratable)
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -397,6 +400,13 @@ class VoiceControlApp:
         self._hand_engine = None
         self._hand_preview_photo = None
         self._preview_warning_done = False
+
+        # Hand-cursor calibration state (two-phase reach-sample flow).
+        self._calibrating = False
+        self._calib_phase = 0          # 0=idle, 1=rest, 2=reach
+        self._calib_samples = []       # collected normalised hand sizes
+        self._calib_rest = []          # phase-1 (resting) samples kept aside
+        self._calib_target = 0         # samples still to collect
 
         self.config = load_config()
         self._ready = False  # blocks control callbacks until the GUI is built
@@ -612,8 +622,16 @@ class VoiceControlApp:
                  bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT, padx=(10, 2))
         self.camera_var = tk.StringVar(
             value=str(self.config.get("camera_index", 0)))
+        cam_cams = [str(i) for i in range(6)]
+        try:
+            if HAND_DEPS_OK and available_cameras is not None:
+                cam_cams = [str(i) for i in available_cameras(limit=6)]
+                if not cam_cams:
+                    cam_cams = ["0"]
+        except Exception:
+            pass
         cam_menu = tk.OptionMenu(
-            hand_row, self.camera_var, "0", "1", "2", "3", "4", "5",
+            hand_row, self.camera_var, *cam_cams,
             command=self._on_camera_change,
         )
         cam_menu.config(bg=BG_COLOR, fg=FG_COLOR, highlightthickness=1,
@@ -629,6 +647,41 @@ class VoiceControlApp:
             activeforeground=MUTED, highlightthickness=0, bd=0,
             command=self._on_preview_toggle,
         ).pack(side=tk.LEFT, padx=(10, 0))
+
+        # ---- Sensitivity + scroll sliders + CALIBRATE ----------------------
+        hand_sliders = tk.Frame(hand_card, bg=SUBTLE_BG)
+        hand_sliders.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        self.sensitivity_var = tk.DoubleVar(
+            value=float(self.config.get("hand_sensitivity", 1.0)))
+        tk.Label(hand_sliders, text="Sens:", font=(FONT_NAME, 8),
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT)
+        tk.Scale(hand_sliders, from_=0.2, to=2.5, resolution=0.1,
+                 orient=tk.HORIZONTAL, variable=self.sensitivity_var,
+                 command=self._on_sensitivity_change, length=90,
+                 bg=SUBTLE_BG, fg=MUTED, troughcolor="#21262d",
+                 highlightthickness=0, bd=0, showvalue=False,
+                 font=(FONT_NAME, 7)).pack(side=tk.LEFT, padx=(0, 8))
+
+        self.scroll_speed_var = tk.DoubleVar(
+            value=float(self.config.get("hand_scroll_speed", 1.0)))
+        tk.Label(hand_sliders, text="Scroll:", font=(FONT_NAME, 8),
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT)
+        tk.Scale(hand_sliders, from_=0.2, to=3.0, resolution=0.1,
+                 orient=tk.HORIZONTAL, variable=self.scroll_speed_var,
+                 command=self._on_scroll_speed_change, length=90,
+                 bg=SUBTLE_BG, fg=MUTED, troughcolor="#21262d",
+                 highlightthickness=0, bd=0, showvalue=False,
+                 font=(FONT_NAME, 7)).pack(side=tk.LEFT, padx=(0, 12))
+
+        self.calib_btn = tk.Button(
+            hand_sliders, text="CALIBRATE REACH",
+            font=(FONT_NAME, 7, "bold"), bg="#30363d", fg=MUTED,
+            activebackground="#484f58", activeforeground=FG_COLOR,
+            relief=tk.FLAT, padx=8, pady=1, cursor="hand2",
+            command=self._calibrate_reach,
+        )
+        self.calib_btn.pack(side=tk.LEFT)
 
         self.preview_canvas = tk.Label(
             hand_card, bg=LOG_BG_COLOR, text="(preview turned off)",
@@ -913,8 +966,8 @@ class VoiceControlApp:
 
         kind: "log" | "status" | "running" | "level" | "heard" |
               "threshold" | "autoselect" | "autodone" | "testdone" |
-              "hand_state" | "hand_preview" | "started" | "stopped" |
-              "error" | "quit"
+              "hand_state" | "hand_preview" | "hand_size" | "started" |
+              "stopped" | "error" | "quit"
         """
         self._queue.put((kind, data))
 
@@ -945,6 +998,8 @@ class VoiceControlApp:
                     self._set_hand_led(str(data))
                 elif kind == "hand_preview":
                     self._show_preview(data)
+                elif kind == "hand_size":
+                    self._on_hand_size(float(data))
                 elif kind == "started":
                     self._set_hand_ui(True, "hand: ON")
                     self._append_log(data)
@@ -2135,6 +2190,92 @@ class VoiceControlApp:
         if not self.preview_var.get():
             self.preview_canvas.configure(text="(preview turned off)")
 
+    def _on_sensitivity_change(self, _val):
+        self.config["hand_sensitivity"] = float(self.sensitivity_var.get())
+        if self._hand_engine is not None:
+            self._hand_engine.set_sensitivity(float(self.sensitivity_var.get()))
+
+    def _on_scroll_speed_change(self, _val):
+        self.config["hand_scroll_speed"] = float(self.scroll_speed_var.get())
+        if self._hand_engine is not None:
+            self._hand_engine.set_scroll_speed(float(self.scroll_speed_var.get()))
+
+    def _on_hand_size(self, hand_size):
+        """Collect live hand-size samples while calibration is active."""
+        if self._calibrating:
+            self._calib_samples.append(hand_size)
+            self._calib_target -= 1
+            if self._calib_target <= 0:
+                if self._calib_phase == 1:
+                    self._calib_rest = list(self._calib_samples)
+                    self._calib_phase = 2
+                    self._calib_samples = []
+                    self._calib_target = 12
+                    self.root.after(1600, self._calibrate_finish)
+                    self._append_log("[CALIB] Now REACH toward your screen "
+                                     "and HOLD for 2 seconds...")
+                elif self._calib_phase == 2:
+                    self._calibrate_finish()
+
+    def _calibrate_reach(self):
+        """Two-phase calibration: rest-size, then reach-size."""
+        if self._calibrating:
+            return
+        self._calibrating = True
+        self._calib_phase = 1
+        self._calib_samples = []
+        self._calib_target = 12
+        self.calib_btn.config(text="CALIBRATING...", state="disabled")
+        self._append_log("[CALIB] Phase 1: put your hand in a RESTING "
+                         "position (e.g. on your lap). Collecting...")
+        self.root.after(2500, self._calibrate_check)
+
+    def _calibrate_check(self):
+        if not self._calibrating or self._calib_phase != 1:
+            return
+        if self._calib_samples:
+            self._calib_rest = list(self._calib_samples)
+            self._calib_phase = 2
+            self._calib_samples = []
+            self._calib_target = 12
+            self._append_log("[CALIB] Phase 2: REACH toward the screen "
+                             "and HOLD for 2 seconds...")
+            self.root.after(2500, self._calibrate_finish)
+        else:
+            self._append_log("[CALIB] No hand detected. Start the hand "
+                             "cursor first, then try again.")
+            self._calibrate_done()
+
+    def _calibrate_finish(self):
+        if not self._calibrating:
+            return
+        rest_samples = [s for s in self._calib_rest if s < 0.35]
+        reach_samples = [s for s in self._calib_samples if s >= 0.25]
+        if len(rest_samples) >= 3 and len(reach_samples) >= 3:
+            rest_median = sorted(rest_samples)[len(rest_samples)//2]
+            reach_max = max(reach_samples)
+            arm = max(0.22, min(0.80, reach_max * 0.72))
+            disarm = max(0.10, min(arm - 0.06, rest_median * 1.25))
+            self.config["hand_arm_size"] = arm
+            self.config["hand_disarm_size"] = disarm
+            if self._hand_engine is not None:
+                self._hand_engine.set_reach_thresholds(arm, disarm)
+            self._append_log(
+                f"[CALIB] Done. ARM={arm:.2f}  DISARM={disarm:.2f}. "
+                "Tuning persisted for next launch.")
+        else:
+            self._append_log("[CALIB] Could not detect enough variation. "
+                             "Repeat and hold each pose more steadily.")
+        self._calibrate_done()
+
+    def _calibrate_done(self):
+        self._calibrating = False
+        self._calib_phase = 0
+        self._calib_samples = []
+        self._calib_rest = []
+        self._calib_target = 0
+        self.calib_btn.config(text="CALIBRATE REACH", state="normal")
+
     def start_hand_cursor(self):
         """Create the engine (if needed) and start it. GUI/thread-safe."""
         if (self._hand_engine is not None and
@@ -2145,6 +2286,8 @@ class VoiceControlApp:
                               "pip install mediapipe pillow")
             self._post("status", "Hand cursor: dependencies missing")
             return
+        arm = self.config.get("hand_arm_size")
+        disarm = self.config.get("hand_disarm_size")
         try:
             engine = HandCursorEngine(
                 camera_index=int(self.config.get("camera_index", 0)),
@@ -2153,6 +2296,8 @@ class VoiceControlApp:
                 emit_preview=bool(self.preview_var.get() and PIL_OK),
                 on_event=self._hand_event,
                 on_preview=self._hand_preview,
+                arm_size=arm if arm else None,
+                disarm_size=disarm if disarm else None,
             )
         except Exception as exc:
             self._post("log", f"[!] Hand cursor failed to start: {exc}")
