@@ -5,16 +5,17 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v5.1 works end-to-end (voice, waveform UI, timers, clipboard history,
+STATUS: v5.2 works end-to-end (voice, waveform UI, timers, clipboard history,
 screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
 log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
 live tuning, chained commands, wake word aliases, timer toast popups,
-clipboard manager GUI card, live calibration size feedback).
+clipboard manager GUI card, live calibration size feedback, gesture trainer
+window, system tray + minimize-to-tray + global hotkey restore).
 
 ------------------------------------------------------------------------------
-1) CURRENT ARCHITECTURE (v5.1)
+1) CURRENT ARCHITECTURE (v5.2)
 -------------------------------------------------------------------------------
-- voice_app.py   ~2900 lines : tkinter GUI + controller.
+- voice_app.py   ~3200 lines : tkinter GUI + controller.
   Threads:  "stt"    (speech -> text, Google Web API)
             "tts"    (pyttsx3 speak queue)
             "timers" (reminder fire loop)
@@ -23,24 +24,30 @@ clipboard manager GUI card, live calibration size feedback).
   Config: voc_config.json (gitignored - holds Gemini key + device index).
   Modules/cards: VOICE (device/lang/AUTO-BEST/start-stop), WAVEFORM,
                  HAND CURSOR (start/stop/cam/preview/SENS slider/SCROLL
-                 slider/CALIBRATE REACH + live size readout), HEARD banner,
-                 CLIPBOARD card (click-to-paste list), ACTIVITY LOG,
-                 status bar.
+                 slider/CALIBRATE REACH + live size readout + TRAIN
+                 GESTURES), HEARD banner, CLIPBOARD card (click-to-paste
+                 list), ACTIVITY LOG, status bar.
+  Tray: pystray icon + "Show/Hide" + "Quit" menu; X button hides to tray
+        (first time a hint is logged); global hotkey ctrl+alt+v restores
+        the window; vocal "minimize to tray" / "show window" work too.
 Command branches: app launch, browser, window, system keys, volume,
    text, search, type, timer/reminder, clipboard, screen vision, cursor
    vision, Gemini memory ("clear my memory"), time/date, notes, calculator,
    site shortcuts, power, autostart, gestures, "open app", Gemini Q&A.
    TTS profiles (voice + Speed slider), click-beep toggles, autostart
    checkbox. Every log line is also written to voc_log.txt (capped).
-   v5.1: chained commands ("open chrome then search weather" - split on
-   "then", sequential execution, 0.6 s between steps); wake-word aliases
-   to re-arm the mic ("hey vo" / "ok vo" / "wake up vo"); timer finished
-   events pop an always-on-top toast (click to dismiss); clipboard card
-   lists the last 4 entries, click to paste; live hand-size label shows
-   "size X.XX (REST/REACH)" during calibration.
+   v5.2: gesture trainer, tray (+ hotkey), training voice commands.
+   (v5.1: chained "then" commands; wake word aliases; timer toasts;
+   clipboard click-to-paste card; calibration live size readout.)
 
 - hand_cursor.py : MediaPipe hand engine (daemon thread).
-  v1.4: REACH GATE - cursor only arms when your hand is CLOSE to the screen
+  v1.5: TRAINING MODE - set_training(True) stops ALL mouse driving and
+        instead emits "train" events (raw pose, stable flag, fingers,
+        size, armed) for the GUI pass/fail trainer; preview overlay and
+        finger panel keep working.
+
+- hand_cursor.py : MediaPipe hand engine (daemon thread).
+  v1.4+: REACH GATE - cursor only arms when your hand is CLOSE to the screen
         (per-user ARM_SIZE/DISARM_SIZE with hysteresis; CALIBRATE REACH in
         the GUI writes per-user values to voc_config.json). STABLE_FRAMES
         (5) debounce stops one-frame flickers. Pinch hysteresis
@@ -49,6 +56,8 @@ Command branches: app launch, browser, window, system keys, volume,
         the app can calibrate. Live set_sensitivity/set_scroll_speed/
         set_reach_thresholds work without restarting. Emits "beep" events
         (left/right/drag) that the app converts into confirmation tones.
+  v1.5: TRAINING MODE (set_training) = no mouse driving, just "train"
+        events for the GUI pass/fail gesture trainer.
   Gestures: index/open = move, pinch = click/drag, peace = scroll,
             three fingers = right-click/drag, fist = drag.
   Never touches the GUI: pushes events through on_event/on_preview queue.
@@ -65,7 +74,9 @@ PHASE A - STABILITY & COMFORT  (mostly DONE in v4.2 / v5.0)
   [x] Click confirmation sound (beep on recognised click/drag) - v5.0.
   [x] Reach/dwell visual feedback during calibration: live "size X.XX
       (REST/REACH)" readout in the HAND CARD - v5.1.
-  [ ] Gesture training screen with live pass/fail overlay feedback.
+  [x] Gesture training window with live pass/fail: TRAIN GESTURES button
+      (or "train gestures" voice command) - engine pauses the mouse and
+      lights each pose green once held ~0.2 s - v5.2.
 
 PHASE B - SMARTER ASSISTANT
   [x] Wake word ("hey vo" / "ok vo" / "wake up vo") to arm mic hands-free - v5.1.
@@ -76,7 +87,8 @@ PHASE B - SMARTER ASSISTANT
   [x] Voice profiles for TTS: voice dropdown + rate slider in GUI - v5.0.
 
 PHASE C - SYSTEM DEEP INTEGRATION (Windows)
-  [ ] System tray icon + minimize-to-tray; global hotkey to re-open.
+  [x] System tray icon + minimize-to-tray (X hides, click tray/hotkey
+      restores, tray Quit really exits) - v5.2.
   [x] Timer finished = always-on-top toast popup (click to dismiss) - v5.1.
   [x] Clipboard manager GUI card (click entry to paste) - v5.1.
   [x] Auto-start on boot option (registry HKCU Run key) - v5.0.
@@ -100,8 +112,7 @@ PHASE D - GESTURE X / PRODUCTISATION
 
 ------------------------------------------------------------------------------
 4) NEXT SHIPMENT (playbook for continuing)
-  1. Gesture training screen + reach overlay pass/fail (Phase A).
-  2. System tray icon + minimize-to-tray, global hotkey (Phase C).
-  3. Run full smoke suite (py_compile + test_v51.py), update QUICK_START.txt
+  1. Phase D first items: two-hand support or virtual touchpad mode.
+  2. Run full smoke suite (py_compile + test_v52.py), update QUICK_START.txt
      + this PLAN, then git add -A && commit && push to origin/main.
 ===============================================================================

@@ -12,3 +12,5 @@ PyAudio==0.2.14              # Microphone capture (has wheels for Python 3.11)
 requests>=2.31.0              # HTTP calls to the Gemini API
 mediapipe==0.10.14           # Hand tracking for the air-cursor (bundles OpenCV)
 Pillow>=10.0.0               # Live camera preview embedded in the GUI
+pystray==0.19.5              # System tray icon (minimize-to-tray)
+keyboard==0.13.5             # Global hotkey to restore the window (ctrl+alt+v)

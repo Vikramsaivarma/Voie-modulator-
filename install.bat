@@ -100,6 +100,8 @@ if errorlevel 1 (
     exit /b 1
 )
 %PY% -c "import PIL; print('   Pillow (camera preview) OK.')" 2>nul || echo   (warn) Pillow missing - run:  pip install Pillow
+%PY% -c "import pystray; print('   pystray (tray icon) OK.')" 2>nul || echo   (warn) pystray missing - run:  pip install pystray
+%PY% -c "import keyboard; print('   keyboard (hotkey) OK.')" 2>nul || echo   (warn) keyboard missing - run:  pip install keyboard
 
 REM ------------------------------------------------------------
 REM  STEP 6: Success banner

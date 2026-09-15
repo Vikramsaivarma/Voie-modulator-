@@ -36,7 +36,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.4.0
+ VERSION   : 1.5.0
 ==============================================================================
 """
 
@@ -192,6 +192,7 @@ class HandCursorEngine:
         self._last_size_event = 0.0  # throttle for calibration size events
         self._drag_beeped = False    # left-click beeped at drag start
         self._right_drag_beeped = False  # right-click beeped at drag start
+        self.training = False          # gesture trainer mode (no mouse driving)
 
     # ------------------------------------------------------------------
     # Public control API
@@ -224,6 +225,18 @@ class HandCursorEngine:
     def set_scroll_speed(self, value):
         """Live scroll gain while doing the peace sign."""
         self.scroll_speed = max(0.1, float(value))
+
+    def set_training(self, flag):
+        """Enable/disable gesture trainer mode.
+
+        While training, the engine performs NO mouse actions - it only
+        classifies the hand and emits `train` events so the GUI can show
+        live pass/fail feedback for every gesture.
+        """
+        self.training = bool(flag)
+        if self.training:
+            self._release_button()
+            self._release_button(right=True)
 
     def set_reach_thresholds(self, arm_size, disarm_size):
         """Apply a calibrated reach gate without restarting the engine.
@@ -514,6 +527,46 @@ class HandCursorEngine:
 
         return label, fingers
 
+    def _training_step(self, lm):
+        """Gesture-trainer mode: classify but never move/click the mouse.
+
+        Emits a `train` event with the live pose so the GUI can show
+        pass/fail for every gesture. Returns `(label, fingers)` so the
+        preview overlay still renders normally.
+        """
+        fingers = [
+            self._thumb_ext(lm),
+            self._finger_ext(lm, INDEX_PIP, INDEX_TIP),
+            self._finger_ext(lm, MIDDLE_PIP, MIDDLE_TIP),
+            self._finger_ext(lm, RING_PIP, RING_TIP),
+            self._finger_ext(lm, PINKY_PIP, PINKY_TIP),
+        ]
+        hand_size = self._hand_size_norm(lm)
+
+        self._release_button()
+        self._release_button(right=True)
+
+        candidate = self._classify(lm, fingers, hand_size)
+        if candidate == self._candidate:
+            self._candidate_frames += 1
+        else:
+            self._candidate = candidate
+            self._candidate_frames = 1
+        stable = self._candidate_frames >= STABLE_FRAMES
+
+        self._send("train", {
+            "raw": candidate,
+            "pose": candidate if stable else None,
+            "stable": stable,
+            "fingers": list(fingers),
+            "size": round(hand_size, 3),
+            "armed": self._armed,
+        })
+        label = ("HOLD " + candidate.upper()) if not stable else \
+                candidate.upper()
+        self._emit_state(label, None)
+        return label, fingers
+
     def _color_for(self, label):
         """Pick a colour for the on-screen overlay / status LED."""
         label = (label or "").upper()
@@ -617,8 +670,11 @@ class HandCursorEngine:
                 if results.multi_hand_landmarks:
                     self._lost_since = None
                     try:
-                        overlay_text, fingers = self._handle_landmarks(
-                            results.multi_hand_landmarks[0].landmark)
+                        landmark = results.multi_hand_landmarks[0].landmark
+                        if self.training:
+                            overlay_text, fingers = self._training_step(landmark)
+                        else:
+                            overlay_text, fingers = self._handle_landmarks(landmark)
                         landmarks = results.multi_hand_landmarks[0]
                     except Exception as exc:
                         self._send("log", f"[!] Gesture error: {exc}")

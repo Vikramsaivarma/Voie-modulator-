@@ -44,6 +44,9 @@
  * CALIBRATION FEEDBACK (v5.1): while CALIBRATE REACH runs, a live
    "size X.XX (REST/REACH)" readout shows the current hand size so you
    can see which pose the app is measuring.
+ * GESTURE TRAINER (v5.2): press TRAIN GESTURES (or say "train gestures")
+   for a live pass/fail panel of every pose. While it is open the mouse
+   is paused and each gesture lights up green once your hand holds it.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -94,7 +97,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.1.0
+VERSION   : 5.2.0
 ================================================================================
 """
 
@@ -138,19 +141,41 @@ except ImportError:
 # optional: the voice app still runs if MediaPipe/Pillow are not installed.
 try:
     from hand_cursor import (HAND_DEPS_OK, HandCursorEngine, bgr_frame_to_pil,
-                             available_cameras)
+                             available_cameras, FINGER_NAMES)
 except ImportError:
     HAND_DEPS_OK = False
     HandCursorEngine = bgr_frame_to_pil = available_cameras = None
+    FINGER_NAMES = ("T", "I", "M", "R", "P")
 
 try:
     from PIL import ImageTk
     from PIL import ImageGrab
+    from PIL import Image as PILImage
+    from PIL import ImageDraw
     PIL_OK = True
 except ImportError:
     ImageTk = None
     ImageGrab = None
+    PILImage = None
+    ImageDraw = None
     PIL_OK = False
+
+# System tray icon + global hotkey are optional conveniences. If the
+# pystray/keyboard packages are missing the app simply quits on the X
+# button as before.
+try:
+    import pystray
+    TRAY_OK = True
+except ImportError:
+    pystray = None
+    TRAY_OK = False
+
+try:
+    import keyboard
+    KEYBOARD_OK = True
+except ImportError:
+    keyboard = None
+    KEYBOARD_OK = False
 
 
 # ----------------------------------------------------------------------
@@ -314,6 +339,8 @@ DEFAULT_CONFIG = {
     "click_beep": True,         # audible click/drag confirmation beep
     "autostart": False,         # auto-start on Windows login
     "voice_id": "",             # "" = default SAPI5 voice; set by dropdown
+    "minimize_to_tray": True,   # X button hides to tray instead of quitting
+    "tray_hotkey": "ctrl+alt+v",  # global hotkey to restore the window
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -421,8 +448,9 @@ class VoiceControlApp:
         "cursor with your hand: raise your index finger or open hand to "
         "move, pinch to click, three fingers for a right click, make a "
         "peace sign to scroll, and make a fist to drag. Say start hand "
-        "cursor or stop hand cursor to switch it on or off. Confirmations "
-        "are audible when click beep sounds are enabled."
+        "cursor or stop hand cursor to switch it on or off, or train "
+        "gestures to open the live pass-and-fail practice window. "
+        "Confirmations are audible when click beep sounds are enabled."
     )
 
     GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon",
@@ -433,7 +461,13 @@ class VoiceControlApp:
         self.root.title("Voice Control - Speech Application")
         self.root.geometry("630x890")
         self.root.configure(bg=BG_COLOR)
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        self._closing = False  # set when the real shutdown starts
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close_request)
+
+        # System tray icon + hotkey state (created once the GUI is up).
+        self._tray_icon = None
+        self._tray_hotkey = None
+        self._tray_hint_shown = False
 
         # Hand-cursor engine state (engine itself is created lazily).
         self._hand_engine = None
@@ -470,6 +504,10 @@ class VoiceControlApp:
         self._last_clip_value = None
         self._clip_watch_started = False
         self._last_rendered_clips = None
+
+        # Gesture trainer window state (none until TRAIN GESTURES is pressed).
+        self._train_window = None
+        self._train_rows = {}
 
         # Worker thread control.
         self._listening_event = threading.Event()
@@ -765,10 +803,23 @@ class VoiceControlApp:
         )
         self.calib_btn.pack(side=tk.LEFT)
 
+        # ---- Second row: TRAIN + Beep + live size readout ----------------
+        hand_actions = tk.Frame(hand_card, bg=SUBTLE_BG)
+        hand_actions.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        self.train_btn = tk.Button(
+            hand_actions, text="TRAIN GESTURES",
+            font=(FONT_NAME, 7, "bold"), bg="#30363d", fg=MUTED,
+            activebackground="#484f58", activeforeground=FG_COLOR,
+            relief=tk.FLAT, padx=8, pady=1, cursor="hand2",
+            command=self._open_trainer,
+        )
+        self.train_btn.pack(side=tk.LEFT)
+
         self.click_beep_var = tk.BooleanVar(
             value=bool(self.config.get("click_beep", True)))
         tk.Checkbutton(
-            hand_sliders, text="Beep", variable=self.click_beep_var,
+            hand_actions, text="Beep", variable=self.click_beep_var,
             font=(FONT_NAME, 7), bg=SUBTLE_BG, fg=MUTED,
             selectcolor=BG_COLOR, activebackground=SUBTLE_BG,
             activeforeground=MUTED, highlightthickness=0, bd=0,
@@ -776,7 +827,7 @@ class VoiceControlApp:
         ).pack(side=tk.LEFT, padx=(10, 0))
 
         self.hand_size_var = tk.StringVar(value="")
-        tk.Label(hand_sliders, textvariable=self.hand_size_var,
+        tk.Label(hand_actions, textvariable=self.hand_size_var,
                  font=(FONT_NAME, 7), bg=SUBTLE_BG, fg=ACCENT).pack(
             side=tk.LEFT, padx=(12, 0))
 
@@ -860,6 +911,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         self.root.after(30, self._poll_queue)
         self._clip_watch_started = False
         self.root.after(800, self._watch_clipboard)
+        # Optional: tray icon + global hotkey for minimize-to-tray.
+        self.root.after(1200, self._start_tray)
 
     # ------------------------------------------------------------------
     # Device / language helpers (GUI thread)
@@ -1125,6 +1178,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                     self._append_log(data)
                 elif kind == "stopped":
                     self._set_hand_ui(False, "hand: off")
+                    if self._train_window is not None:
+                        self._close_trainer()
                 elif kind == "error":
                     self._set_hand_ui(False, "hand: error")
                     self._append_log(data)
@@ -1140,6 +1195,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                     self._append_log(data)
                 elif kind == "beep":
                     self._play_beep(data)
+                elif kind == "train":
+                    self._on_train_update(data)
                 elif kind == "tts_voices":
                     self._populate_voice_menu(data)
                 elif kind == "quit":
@@ -1893,6 +1950,19 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 self._speak("Stopping hand cursor.")
             return
 
+        # ---- Gesture trainer ----------------------------------------------
+        if re.search(r"\b(train|practice|learn|teach|drill)\b",
+                     lowered) and \
+           re.search(r"\b(gesture|gestures|hand)\b", lowered):
+            if re.search(r"\b(stop|close|quit|exit|end)\b", lowered):
+                self._close_trainer()
+                self._speak("Closing the gesture trainer.")
+            else:
+                self._open_trainer()
+                self._post("log", "[i] Opening gesture trainer.")
+                self._speak("Opening the gesture trainer.")
+            return
+
         # ---- Screen analysis via Gemini Vision ----------------------------
         if re.search(r"\b(analy[sz]e|scan|describe|read|what (is|are|do you "
                      r"see)|look at|show me)\b.*\bscreen\b", lowered) or \
@@ -2033,8 +2103,21 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             return
 
         if "minimize" in lowered or "minimise" in lowered:
+            if re.search(r"\b(minimize|minimise)\b.*\b(tray|to tray)\b",
+                         lowered):
+                self.root.withdraw()
+                self._post("log", "[i] Minimized to system tray.")
+                self._speak("Minimized to the system tray.")
+                return
             self._window_action("minimize")
             self._speak("Minimized the window.")
+            return
+
+        # Restore the window (e.g. from tray) - also covers "show window".
+        if re.search(r"\b(show|restore|bring (back|up))\b.*\b(window|app|"
+                     r"tray)\b", lowered):
+            self._restore_window()
+            self._speak("Here I am.")
             return
 
         if "maximize" in lowered or "maximise" in lowered:
@@ -2888,19 +2971,293 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 self._append_log(f"[!] Camera preview unavailable: {exc}")
 
     # ------------------------------------------------------------------
+    # Gesture trainer window
+    # ------------------------------------------------------------------
+    _TRAIN_GESTURES = [
+        ("MOVE",   ("index", "open")),
+        ("CLICK",  ("pinch",)),
+        ("SCROLL", ("peace",)),
+        ("RIGHT CLICK", ("three",)),
+        ("DRAG",   ("fist",)),
+    ]
+
+    def _open_trainer(self):
+        """Open or refocus the gesture-trainer Toplevel."""
+        if self._train_window is not None:
+            try:
+                self._train_window.deiconify()
+                self._train_window.lift()
+                return
+            except tk.TclError:
+                self._train_window = None
+        if (getattr(self, "_hand_engine", None) is None or
+                not self._hand_engine.is_running()):
+            self.start_hand_cursor()
+        self._train_window = win = tk.Toplevel(self.root)
+        win.title("Gesture Trainer")
+        win.geometry("350x320")
+        win.configure(bg=BG_COLOR)
+        win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", self._close_trainer)
+
+        try:
+            win.attributes("-topmost", True)
+        except Exception:
+            pass
+
+        tk.Label(win, text="HOLD EACH POSE FOR ~0.2 s",
+                 font=(FONT_NAME, 9, "bold"), bg=BG_COLOR, fg=MUTED
+                 ).pack(padx=12, pady=(8, 4))
+
+        # Finger panel row.
+        finger_frame = tk.Frame(win, bg=BG_COLOR)
+        finger_frame.pack(padx=12, anchor="w")
+        tk.Label(finger_frame, text="Fingers:", font=(FONT_NAME, 8),
+                 bg=BG_COLOR, fg=MUTED).pack(side=tk.LEFT)
+        self._train_fingers = []
+        for name in FINGER_NAMES:
+            lbl = tk.Label(finger_frame, text=f" {name} ", font=(FONT_NAME, 9),
+                           bg=BG_COLOR, fg="#666", width=3)
+            lbl.pack(side=tk.LEFT, padx=1)
+            self._train_fingers.append(lbl)
+
+        self._train_armed_var = tk.StringVar(value="Cursor armed: --")
+        tk.Label(win, textvariable=self._train_armed_var,
+                 font=(FONT_NAME, 8), bg=BG_COLOR, fg=MUTED,
+                 anchor="w").pack(fill=tk.X, padx=12, pady=(6, 2))
+
+        # Gesture rows.
+        rows_frame = tk.Frame(win, bg=BG_COLOR)
+        rows_frame.pack(fill=tk.BOTH, expand=True, padx=12, pady=(4, 0))
+
+        self._train_rows = {}
+        for name, _ in self._TRAIN_GESTURES:
+            row = tk.Frame(rows_frame, bg=SUBTLE_BG)
+            row.pack(fill=tk.X, pady=1)
+            tk.Label(row, text=f"  {name}", font=(FONT_NAME, 9, "bold"),
+                     bg=SUBTLE_BG, fg="#e6edf3", width=12, anchor="w"
+                     ).pack(side=tk.LEFT)
+            dot = tk.Label(row, text="  WAIT  ", font=(FONT_NAME, 8),
+                           bg="#21262d", fg=MUTED)
+            dot.pack(side=tk.LEFT, padx=(6, 0))
+            self._train_rows[name] = dot
+
+        # Quit button.
+        tk.Button(win, text="QUIT TRAINER", font=(FONT_NAME, 8, "bold"),
+                  bg="#30363d", fg=MUTED, activebackground="#484f58",
+                  activeforeground=FG_COLOR, relief=tk.FLAT,
+                  cursor="hand2", command=self._close_trainer,
+                  ).pack(pady=(8, 8))
+
+        # Enable training mode in the engine.
+        engine = getattr(self, "_hand_engine", None)
+        if engine is not None and engine.is_running():
+            engine.set_training(True)
+            self._append_log("[i] Gesture trainer open - mouse paused.")
+        else:
+            self._append_log("[!] Start the hand cursor first, then "
+                             "re-open the trainer.")
+
+    def _close_trainer(self):
+        """Close trainer window and re-enable normal mouse control."""
+        engine = getattr(self, "_hand_engine", None)
+        if engine is not None:
+            try:
+                engine.set_training(False)
+            except Exception:
+                pass
+        if self._train_window is not None:
+            try:
+                self._train_window.destroy()
+            except tk.TclError:
+                pass
+            self._train_window = None
+            self._train_rows.clear()
+        self._append_log("[i] Gesture trainer closed.")
+
+    def _on_train_update(self, data):
+        """Handle a `train` event from the engine (GUI thread)."""
+        if self._train_window is None:
+            return
+        raw = data.get("raw", "")
+        stable = data.get("stable", False)
+        fingers = data.get("fingers", [])
+        size = data.get("size", 0)
+        armed = data.get("armed", False)
+
+        # Update gesture rows.
+        for name, poses in self._TRAIN_GESTURES:
+            row = self._train_rows.get(name)
+            if row is None:
+                continue
+            match = raw in poses
+            if match:
+                row.config(text=" PASS " if stable else " PROVING ",
+                           bg="#238636" if stable else "#1f6feb")
+            else:
+                row.config(text="  WAIT  ", bg="#21262d")
+
+        # Update finger panel.
+        for i, lbl in enumerate(self._train_fingers):
+            ext = fingers[i] if i < len(fingers) else False
+            lbl.config(bg="#238636" if ext else "#21262d",
+                       fg="#e6edf3" if ext else "#666")
+
+        # Update armed + size.
+        arm_txt = "YES" if armed else "NO"
+        self._train_armed_var.set(
+            f"Cursor armed: {arm_txt}   |   size: {size:.3f}")
+
+    # ------------------------------------------------------------------
+    # System tray icon + minimize-to-tray + global hotkey
+    # ------------------------------------------------------------------
+    def _start_tray(self):
+        """Create the tray icon and register the restore hotkey (GUI thread).
+
+        Optional: if pystray/keyboard are missing, or a configuration flag
+        is off, the app simply keeps its old close-to-quit behaviour.
+        """
+        if not TRAY_OK or not self.config.get("minimize_to_tray", True):
+            return
+        try:
+            icon_img = self._tray_image()
+            menu = pystray.Menu(
+                pystray.MenuItem("Show / Hide window", self._tray_toggle),
+                pystray.MenuItem("Quit Voice Control", self._tray_quit),
+            )
+            self._tray_icon = pystray.Icon(
+                "voice-control", icon_img, "Voice Control", menu)
+            self._tray_icon.run_detached()
+        except Exception as exc:
+            self._append_log(f"[i] Tray icon unavailable: {exc}")
+            self._tray_icon = None
+            return
+
+        hotkey = self.config.get("tray_hotkey", "").strip()
+        if hotkey and KEYBOARD_OK:
+            try:
+                self._tray_hotkey = keyboard.add_hotkey(
+                    hotkey, self._hotkey_restore)
+                self._append_log(f"[i] Minimized to tray. {hotkey} restores "
+                                 "the window; tray menu Quit really exits.")
+            except Exception as exc:
+                self._append_log(f"[i] Hotkey '{hotkey}' unavailable: {exc}")
+
+    def _tray_image(self):
+        """Draw a small microphone-style icon for the tray.
+
+        Uses pure PIL so no image assets are needed.
+        """
+        if not PIL_OK or PILImage is None or ImageDraw is None:
+            return None
+        img = PILImage.new("RGBA", (64, 64), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.rounded_rectangle(
+            (8, 8, 56, 56), radius=14, fill=(13, 17, 23, 255),
+            outline=(88, 166, 255, 255), width=4)
+        draw.rectangle((24, 20, 40, 38), fill=(88, 166, 255, 255))
+        draw.rounded_rectangle((14, 28, 50, 40), radius=5,
+                               fill=(88, 166, 255, 255))
+        draw.rectangle((27, 42, 37, 48), fill=(88, 166, 255, 255))
+        draw.rounded_rectangle((20, 48, 44, 56), radius=4,
+                               fill=(88, 166, 255, 255))
+        return img
+
+    def _hotkey_restore(self):
+        """Global-hotkey callback (keyboard thread) - hop to the GUI."""
+        try:
+            self.root.after(0, self._restore_window)
+        except tk.TclError:
+            pass
+
+    def _restore_window(self):
+        """Show and focus the main window (called from tray/hotkey)."""
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.state("normal")
+            self.root.attributes("-topmost", True)
+            self.root.after(120, lambda: self.root.attributes("-topmost",
+                                                              False))
+        except tk.TclError:
+            pass
+
+    def _tray_toggle(self, icon=None, item=None):
+        """Tray menu: show/hide the main window."""
+        try:
+            if self.root.state() == "withdrawn":
+                self._restore_window()
+            else:
+                self.root.withdraw()
+        except tk.TclError:
+            pass
+
+    def _tray_quit(self, icon=None, item=None):
+        """Tray menu: really quit the app."""
+        self._post("quit")
+
+    def _on_close_request(self):
+        """The X button: hide to tray (once) instead of quitting outright."""
+        if self._closing:
+            return
+        if (TRAY_OK and self.config.get("minimize_to_tray", True) and
+                self._tray_icon is not None):
+            try:
+                self.root.withdraw()
+                if not self._tray_hint_shown:
+                    self._tray_hint_shown = True
+                    self._append_log(
+                        "[i] Minimized to tray - click the tray icon or "
+                        f"press {self.config.get('tray_hotkey', '')} to "
+                        "restore. Tray menu Quit really exits.")
+                return
+            except tk.TclError:
+                pass
+        self.on_close()
+
+    # ------------------------------------------------------------------
     # Shutdown
     # ------------------------------------------------------------------
     def on_close(self):
-        """Clean up threads and close the window."""
+        """Clean up threads and close the window (real shutdown)."""
+        if self._closing:
+            return
+        self._closing = True
         self._listening_event.clear()
         with self._timers_lock:
             self._timers = []
         save_config(self.config)
+        # Close trainer and disable training before stopping the engine.
+        if self._train_window is not None:
+            engine = getattr(self, "_hand_engine", None)
+            if engine is not None:
+                try:
+                    engine.set_training(False)
+                except Exception:
+                    pass
+            try:
+                self._train_window.destroy()
+            except tk.TclError:
+                pass
+            self._train_window = None
         if getattr(self, "_hand_engine", None) is not None:
             try:
                 self._hand_engine.stop()
             except Exception:
                 pass
+        # Stop the tray icon and unregister the global hotkey.
+        if self._tray_hotkey is not None and KEYBOARD_OK:
+            try:
+                keyboard.remove_hotkey(self._tray_hotkey)
+            except Exception:
+                pass
+            self._tray_hotkey = None
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
         try:
             pyautogui.FAILSAFE = False
         except Exception:

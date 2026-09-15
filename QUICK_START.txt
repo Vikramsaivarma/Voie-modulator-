@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v5.1)
+VOICE CONTROL - QUICK START GUIDE  (v5.2)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -10,9 +10,12 @@ Gemini SESSION MEMORY, TTS voice profiles (voice + speed), AUDIBLE CLICK
 BEEPS, AUTO-START on login, ACTIVITY LOG saved to voc_log.txt, TIMERS/
 REMINDERS (with toast popups), CLIPBOARD HISTORY (with a click-to-paste
 card), CHAINED COMMANDS ("open chrome then search weather"), WAKE WORD
-("hey vo"), AUTO-BEST microphone selection, and a HAND-CURSOR air mouse:
-use your webcam to move the pointer and "touch" the screen with finger
-gestures (with a live 5-finger state panel on the preview).
+("hey vo"), SYSTEM TRAY icon with minimize-to-tray and a global hotkey
+(ctrl+alt+v) to bring the window back, a GESTURE TRAINER window with live
+pass/fail feedback for every hand pose, AUTO-BEST microphone selection,
+and a HAND-CURSOR air mouse: use your webcam to move the pointer and
+"touch" the screen with finger gestures (with a live 5-finger state panel
+on the preview).
 
 --------------------------------------------------------------------------------
 1) REQUIREMENTS
@@ -159,6 +162,10 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
       Sens slider  -> pointer speed/mapping (1.0 = full frame, raise to zoom)
       Scroll slider-> how fast the peace sign scrolls
       Beep box     -> audible confirmation tone on every click / drag
+      TRAIN GESTURES -> opens the live PRACTICE WINDOW: while it is open
+      the mouse is paused and every pose lights up green the moment your
+      hand holds it for about 0.2 s (MOVE, CLICK, SCROLL, RIGHT CLICK,
+      DRAG). Say "close gesture trainer" when done.
       CALIBRATE REACH -> two-phase wizard (rest your hand, then reach toward
       the screen) that writes your personal ARM/DISARM reach thresholds into
       voc_config.json so the cursor ignores a hand resting on your lap.
@@ -166,7 +173,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
       hand size and which pose is being measured: "size 0.31 (REST)" or
       "size 0.52 (REACH)".
 
-  * RAISE-GATED cursor (v1.4): the cursor only controls the mouse while your
+  * RAISE-GATED cursor (v1.5): the cursor only controls the mouse while your
     hand is CLOSE to the screen. Rest your hand on your lap or near the
     keyboard and it does NOTHING - no ghost moves, no ghost clicks. Reach
     toward the screen to arm it; bring it closer still to hover/click.
@@ -196,6 +203,9 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     voice_rate          TTS reading speed (80-320, 180 default)
     voice_id            Windows SAPI5 voice id ("" = default)
     autostart           true/false = start the app when you sign in
+    minimize_to_tray    true/false = X hides to tray ("" still quits if no tray)
+    tray_hotkey         global key combo that restores the window (default
+                        ctrl+alt+v; empty disables the hotkey)
 
 -------------------------------------------------------------------------------
 7) VOICE COMMANDS
@@ -239,10 +249,19 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     "Open notepad and then type hello"
     "Search cat videos then minimize"
 
+  SYSTEM TRAY:
+    The X button hides the window to the system tray (click the tray
+    icon to restore). Say "minimize to tray" by voice, or press
+    Ctrl+Alt+V to bring the window back. The tray menu has Quit.
+    First hide: a helpful message is logged with the hotkey.
+    Say "show window" / "restore window" to bring it back by voice.
+
   LIFECYCLE:
     "Stop Listening" -> pauses; resume with "Start Listening"
         (or hands-free: "Hey vo" / "OK vo" / "Wake up vo")
     "Start Hand Cursor" / "Stop Hand Cursor"  -> air mouse on/off
+    "Train Gestures" / "Open trainer"  -> gesture practice window
+    "Close gesture trainer" / "Stop trainer"
     "Help"             -> app reads the command list aloud
     "Quit" / "Exit"    -> closes the app
 
@@ -336,7 +355,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
-  test_v51.py         Dev-only smoke test suite for the v5.1 features
+  test_v52.py         Dev-only smoke test suite for the v5.2 features
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!
