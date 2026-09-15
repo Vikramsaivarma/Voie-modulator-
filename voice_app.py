@@ -19,6 +19,13 @@
    "set a reminder at 3 o'clock to drink water".
  * CLIPBOARD HISTORY: the app tracks the last few things you copied and
    can replay them ("what did I copy", "show my clipboard").
+ * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
+ *    "what time is it" / "what date is it today"
+ *    "take a note: <text>" -> appends to voc_notes.txt
+ *    "calculate 15 percent of 240" / "what is 12 times 8" (safe math)
+ *    "open youtube / gmail / whatsapp / drive / maps / github..."
+ *    "shut down the computer" / "restart the computer"
+ *    "put the computer to sleep" / "lock screen"
  * Real-time scrolling command log with live status.
  * Stabilised voice-activity detection (VAD) that does not drift away
    from normal speech levels in a noisy room.
@@ -62,15 +69,17 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 4.0.0
+VERSION   : 4.1.0
 ===============================================================================
 """
 
 import array
+import ast
 import base64
 import ctypes
 import io
 import json
+import math
 import os
 import queue
 import re
@@ -192,6 +201,27 @@ CHROME_CANDIDATES = [
     r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
     os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
 ]
+
+# Quick voice shortcuts for popular web sites ("open youtube").
+SITE_SHORTCUTS = {
+    "youtube": "https://www.youtube.com",
+    "gmail": "https://mail.google.com",
+    "google": "https://www.google.com",
+    "google drive": "https://drive.google.com",
+    "drive": "https://drive.google.com",
+    "whatsapp": "https://web.whatsapp.com",
+    "github": "https://github.com",
+    "stack overflow": "https://stackoverflow.com",
+    "maps": "https://www.google.com/maps",
+    "wordle": "https://www.nytimes.com/games/wordle",
+    "netflix": "https://www.netflix.com",
+    "spotify": "https://open.spotify.com",
+}
+
+# Quick voice notes are appended to this file next to the app.
+NOTES_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "voc_notes.txt"
+)
 
 # Aliases normalising what the user says to the keys above.
 APP_ALIASES = {
@@ -340,7 +370,11 @@ class VoiceControlApp:
         "open a Chrome search as well. I can look at your screen and "
         "describe it: say screen analysis. I can set timers: say set a "
         "timer for 5 minutes, or set a reminder at 3 o'clock. I remember "
-        "your clipboard: say what did I copy. Use AUTO-BEST in the app to "
+        "your clipboard: say what did I copy. I also tell the time and "
+         "date, take notes after the word note, do math like calculate 15 "
+         "percent of 240, open sites like youtube, gmail and maps, shut "
+         "down the computer, restart it, put it to sleep, and lock the "
+         "screen. Use AUTO-BEST in the app to "
         "pick the best microphone. Say stop listening to pause, start "
         "listening to resume, and help for this message. I also control "
         "the mouse cursor with your hand: raise your index finger or open "
@@ -1507,6 +1541,46 @@ class VoiceControlApp:
             self._speak(text[:220])
             return
 
+        # ---- Time / date ------------------------------------------------
+        if any(w in lowered for w in ("what time", "time is it",
+                                      "current time", "time now",
+                                      "what is the time")):
+            now = time.strftime("%I:%M %p")
+            self._post("log", f"[i] The time is {now}.")
+            self._speak(f"The time is {now}.")
+            return
+        if any(w in lowered for w in ("what date", "what day", "today's date",
+                                      "what is the date", "what day is it",
+                                      "current date")):
+            today = time.strftime("%A, %B %d, %Y")
+            self._post("log", f"[i] Today is {today}.")
+            self._speak(f"Today is {today}.")
+            return
+
+        # ---- Take a note --------------------------------------------------
+        m = re.search(r"(?:^|\b)(?:take|write|make|save)\s+(?:a\s+)?note[\s:,]+"
+                      r"(.*)", original, re.I)
+        if m:
+            text = TRAILING_FILLER.sub("", m.group(1)).strip()
+            if text:
+                self._save_note(text)
+            else:
+                self._speak("What should I write down?")
+            return
+
+        # ---- Calculator (safe arithmetic) --------------------------------
+        m = re.match(r"(?:^|\b)(?:calculate|compute|work out|what is|what's|"
+                     r"how much is)\s+(.+)", lowered)
+        if m:
+            expr = TRAILING_FILLER.sub("", m.group(1)).strip()
+            expr = expr.replace("x", "*").replace("×", "*").replace(
+                "÷", "/").replace("equal to", "").replace("equals", "=")
+            result = self._eval_math(expr)
+            if result is not None:
+                self._post("log", f"[i] {expr} = {result}")
+                self._speak(f"That is {result}.")
+            return
+
         # ============ Discrete command keywords ==========================
         if "close window" in lowered or "close the window" in lowered:
             self._safe_keys(lambda: pyautogui.hotkey("alt", "f4"))
@@ -1567,6 +1641,30 @@ class VoiceControlApp:
         if "lock" in lowered:  # "lock screen / lock the computer"
             self._safe_keys(lambda: pyautogui.hotkey("win", "l"))
             self._speak("Locking the screen.")
+            return
+
+        # ---- Power (dangerous - only trigger with explicit language) ------
+        if re.search(r"\b(shut\s*down|power off|turn off)\b.*"
+                     r"\b(computer|pc|laptop|machine)\b", lowered):
+            self._speak("Shutting down in 30 seconds. "
+                        "Say open command prompt to cancel.")
+            subprocess.Popen(["shutdown", "/s", "/t", "30", "/c",
+                              "Shutting down per voice command."])
+            self._post("log", "[i] Shutdown scheduled in 30 seconds.")
+            return
+        if re.search(r"\brestart\b.*"
+                     r"\b(computer|pc|laptop|machine)\b", lowered):
+            self._speak("Restarting in 30 seconds.")
+            subprocess.Popen(["shutdown", "/r", "/t", "30", "/c",
+                              "Restarting per voice command."])
+            self._post("log", "[i] Restart scheduled in 30 seconds.")
+            return
+        if re.search(r"\b(sleep|hibernate)\b.*"
+                     r"\b(computer|pc|laptop|machine)\b", lowered):
+            self._speak("Putting the computer to sleep.")
+            subprocess.Popen(["rundll32.exe", "powrprof.dll,SetSuspendState",
+                              "0,1,0"])
+            self._post("log", "[i] Computer going to sleep.")
             return
 
         # ---- Volume -----------------------------------------------------
@@ -1671,6 +1769,10 @@ class VoiceControlApp:
                 self._post("log", f"[i] Opening {target}...")
                 self._speak(f"Opening {target}." if ok else
                             f"Could not open {target}.")
+            elif norm in SITE_SHORTCUTS:
+                self._open_browser(SITE_SHORTCUTS[norm])
+                self._post("log", f"[i] Opening {target}...")
+                self._speak(f"Opening {target}.")
             else:
                 self._post("log", f"[i] I do not know how to open "
                                    f"{target}.")
@@ -1887,6 +1989,62 @@ class VoiceControlApp:
             pyautogui.write(text, interval=0.02)
         except Exception as exc:
             self._post("log", f"[!] Could not type: {exc}")
+
+    def _eval_math(self, expression):
+        """Safely evaluate a simple arithmetic expression from speech.
+
+        Accepts numbers, + - * / % ( ) and a handful of math functions.
+        Returns the result as a readable string, or None on failure.
+        """
+        expr = expression.lower()
+        expr = re.sub(r"\b(percent|percentage)\b of", "/100*", expr)
+        expr = expr.replace(" and ", " + ").replace("plus", "+").replace(
+            "minus", "-").replace("times", "*").replace("multiplied by", "*").\
+            replace("divided by", "/").replace("over", "/").replace(
+            "to the power of", "**").replace("squared", "**2").replace(
+            "cubed", "**3")
+        expr = re.sub(r"[^0-9+\-*/().%\s^]", "", expr)
+        expr = expr.replace("^", "**")
+        expr = re.sub(r"\s+", "", expr)
+        if not expr or not re.search(r"\d", expr):
+            return None
+        expr = expr.rstrip("=+")
+        try:
+            tree = ast.parse(expr, mode="eval")
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.Import, ast.ImportFrom)):
+                    return None
+                if isinstance(node, ast.Call) and not isinstance(
+                        node.func, ast.Name):
+                    return None
+                if isinstance(node, ast.Name) and node.id not in (
+                        "abs", "sqrt", "round", "int", "float"):
+                    return None
+            result = eval(
+                compile(tree, "<voice>", "eval"),
+                {"__builtins__": {}},
+                {"abs": abs, "round": round, "int": int, "float": float,
+                 "sqrt": math.sqrt},
+            )
+        except Exception:
+            return None
+        if isinstance(result, float) and result.is_integer():
+            return str(int(result))
+        if isinstance(result, (int, float)):
+            return str(round(result, 6))
+        return None
+
+    def _save_note(self, text):
+        """Append a quick voice note to voc_notes.txt."""
+        try:
+            stamp = time.strftime("%Y-%m-%d %H:%M")
+            with open(NOTES_FILE, "a", encoding="utf-8") as fh:
+                fh.write(f"[{stamp}] {text}\n")
+            self._post("log", f"[i] Note saved: {text}")
+            self._speak("Noted.")
+        except OSError as exc:
+            self._post("log", f"[!] Could not save note: {exc}")
+            self._speak("I could not save the note.")
 
     def _safe_keys(self, action):
         """Run a pyautogui key action and log any failure."""

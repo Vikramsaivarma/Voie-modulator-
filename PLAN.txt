@@ -1,0 +1,82 @@
+===============================================================================
+ VOICE + GESTURE CONTROL  -  PRODUCT PLAN  (plan.txt)
+===============================================================================
+Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
+assistant" that feels natural: talk to it, reach toward the screen to use the
+mouse, and let it handle routine computer tasks.
+
+STATUS: v4.1 works end-to-end (voice, waveform UI, timers, clipboard history,
+screen vision, math, notes, sites, power, reach-gated air cursor).
+
+------------------------------------------------------------------------------
+1) CURRENT ARCHITECTURE (v4.1)
+------------------------------------------------------------------------------
+- voice_app.py   ~2300 lines : tkinter GUI + controller.
+  Threads:  "stt"    (speech -> text, Google Web API)
+            "tts"    (pyttsx3 speak queue)
+            "timers" (reminder fire loop)
+  GUI thread: clipboard watcher, waveform meter, hand preview, log.
+  Config: voc_config.json (gitignored - holds Gemini key + device index).
+  Modules/cards: VOICE (device/lang/AUTO-BEST/start-stop), WAVEFORM,
+                 HAND CURSOR (start/stop/cam/preview), HEARD banner,
+                 ACTIVITY LOG, status bar.
+  Command branches: app launch, browser, window, system keys, volume, text,
+  search, type, timer/reminder, clipboard, screen vision, time/date, notes,
+  calculator, site shortcuts, power, gestures, "open app", Gemini Q&A.
+
+- hand_cursor.py : MediaPipe hand engine (daemon thread).
+  v1.2: REACH GATE - cursor only arms when your hand is CLOSE to the screen
+        (hand-size hysteresis ARM_SIZE/DISARM_SIZE). STABLE_FRAMES debounce
+        stops one-frame flickers. Pinch hysteresis (ENGAGE/RELEASE). Ambiguous
+        poses (middle-only, thumbs-up) fall back to MOVE, never a button.
+  Gestures: index/open = move, pinch = click/drag, peace = scroll,
+            three fingers = right-click/drag, fist = drag.
+  Never touches the GUI: pushes events through on_event/on_preview queue.
+
+------------------------------------------------------------------------------
+2) VISION - "ONE-COMMAND COMPUTER"  (roadmap)
+------------------------------------------------------------------------------
+PHASE A - STABILITY & COMFORT (next, highest priority)
+  [ ] Calibration UI: 1-time "show me your hand level" -> writes
+      ARM_SIZE/DISARM_SIZE into voc_config.json (per-user reach distance).
+  [ ] Gesture training screen with live pass/fail overlay feedback.
+  [ ] Pointer dwell-to-click + click confirmation sound (less shake).
+  [ ] Sensitivity slider wired live (already parsed, needs GUI binding).
+  [ ] Camera picker using available_cameras() integrated in GUI.
+
+PHASE B - SMARTER ASSISTANT
+  [ ] Wake word ("hey vo") to arm mic without a global hotkey.
+  [ ] On-demand screen vision: "what's under my cursor" (region grab).
+  [ ] Multi-step commands chained: "open chrome then search weather".
+  [ ] Gemini memory: short conversation context retained per session.
+  [ ] Voice profiles for TTS: rate/pitch/voice selectable in GUI.
+
+PHASE C - SYSTEM DEEP INTEGRATION (Windows)
+  [ ] System tray icon + minimize-to-tray; global hotkey to re-open.
+  [ ] Notification balloons for phrased events (timer, clipboard).
+  [ ] Clipboard manager GUI card (click entry to paste).
+  [ ] Auto-start on boot option (registry Run / startup folder).
+  [ ] Activity log persistence to voc_log.txt.
+
+PHASE D - GESTURE X / PRODUCTISATION
+  [ ] Two-hand support (left = pointer, right = modifiers).
+  [ ] Virtual touchpad mode: hand mapped to a trackpad region.
+  [ ] Gesture macros: draw a letter/shape to trigger app actions.
+  [ ] Installer (PyInstaller single exe) + auto-update check.
+  [ ] Packaging: signed build, first-run wizard, privacy notice.
+
+------------------------------------------------------------------------------
+3) TESTING & QUALITY BAR  (every release)
+  - "C:\Users\Jo\anaconda3\python.exe" -m py_compile voice_app.py hand_cursor.py
+  - GUI widget smoke test (all cards present, clean close).
+  - Synthetic-landmark unit checks for every gesture + reach gate.
+  - Live camera smoke: hand engine 30s, no python/pythonw strays left behind.
+  - Kill leftover python processes before any camera test (they lock the cam).
+  - config note: NEVER commit voc_config.json; device_index in config trumps.
+
+------------------------------------------------------------------------------
+4) NEXT SHIPMENT (playbook for continuing)
+  1. Calibration + sensitivity GUI binding (Phase A).
+  2. Run full smoke suite, update QUICK_START.txt + this PLAN.
+  3. git add -A && commit && push to origin/main.
+===============================================================================

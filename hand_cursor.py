@@ -15,6 +15,16 @@
      A 5-finger panel on the preview overlay shows whether each finger
      (thumb, index, middle, ring, pinky) is currently extended.
 
+ ANTI-ACCIDENT DESIGN (v1.2)
+ ---------------------------
+ A pose is only trusted after it has been observed for several consecutive
+ frames (`STABLE_FRAMES`), so a momentary wobble or a resting hand cannot
+ trigger a click. The pinch uses hysteresis (tight ENGAGE / RELEASE ratio),
+ and any ambiguous pose (e.g. a single middle or ring finger, a thumbs-up,
+ several fingers up but not a recognised sign) falls back to ordinary MOVE -
+ it can never grab the mouse button by mistake. Every mode change is
+ debounced, so the engine never "does things on its own".
+
  The engine NEVER touches the tkinter GUI directly. All GUI-bound events are
  forwarded through the `on_event(kind, data)` callback (normally the app
  pushes them into its thread-safe queue). Preview frames are forwarded, when
@@ -26,8 +36,8 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.1.0
-===============================================================================
+ VERSION   : 1.2.0
+==============================================================================
 """
 
 import math
@@ -75,12 +85,25 @@ FINGER_NAMES = ("T", "I", "M", "R", "P")
 
 # Horizontal multiplier applied to hand movement when scrolling.
 SCROLL_GAIN  = 0.05
-# How close (as a fraction of hand size) the thumb and index must be before we
-# call it a pinch.
-PINCH_RATIO  = 0.45
+# Pinch recognition with HYSTERESIS: it must get closer than PINCH_ENGAGE before
+# a click/drag engages, and may stay engaged until it opens wider than RELEASE.
+# click/drag engages, and may stay engaged until it opens wider than RELEASE.
+# This prevents a resting thumb+index pair from flickering into a click.
+PINCH_ENGAGE = 0.28
+PINCH_RELEASE = 0.55
 # Minimum thumb-to-index distance (fraction of hand size) counted as "extended"
 # when we decide if the thumb is raised.
 THUMB_EXT_RATIO = 0.40
+# A pose must be seen for this many consecutive frames before it takes effect.
+# With ~20-30 fps that is only ~0.15-0.2 s, but it kills one-frame flickers.
+STABLE_FRAMES = 5
+# "Reach toward the screen" arming. The cursor is only controlled while your
+# hand is CLOSE to the camera (= towards you = towards the screen). Hand size
+# is measured in normalised image units (0..1), so a resting hand in front of
+# you/holding the laptop stays small and is IGNORED. It must grow bigger than
+# ARM_SIZE to engage, and shrinks below DISARM_SIZE to disengage.
+ARM_SIZE       = 0.30
+DISARM_SIZE    = 0.20
 # Cursor smoothing factor (0..1). Lower = steadier but lazier.
 SMOOTHING    = 0.45
 # Frames per second cap for the inference loop.
@@ -156,6 +179,13 @@ class HandCursorEngine:
         self._last_preview = 0.0
         self._last_state = 0.0
         self._screen = (1920, 1080)
+
+        # Anti-accident debounce state.
+        self._armed = False          # cursor control armed (hand is near screen)
+        self._candidate = None       # pose seen in the current run
+        self._candidate_frames = 0   # consecutive frames for that pose
+        self._pinch_engaged = False  # hysteresis latch for the pinch
+        self._mode_since = 0.0       # when the current stable mode began
 
     # ------------------------------------------------------------------
     # Public control API
@@ -278,6 +308,54 @@ class HandCursorEngine:
         return _norm_dist(lm[THUMB_TIP], lm[INDEX_PIP]) / \
             hand_size > THUMB_EXT_RATIO
 
+    def _hand_size_norm(self, lm):
+        """Normalised hand size (0..1) = biggest wrist-to-fingertip span.
+
+        Measured in the SAME units as the landmark coordinates, so it is a
+        direct depth proxy: a hand reaching toward the screen becomes big,
+        a resting hand stays small.  Used to arm/disarm the cursor.
+        """
+        tips = (THUMB_TIP, INDEX_TIP, MIDDLE_TIP, RING_TIP, PINKY_TIP)
+        return max(_norm_dist(lm[WRIST], lm[i]) for i in tips)
+
+    def _classify(self, lm, fingers, hand_size):
+        """Classify the hand pose into a mode string.
+
+        Ambiguous poses (middle/ring/pinky alone, thumbs up, odd combos)
+        deliberately fall through to "open" = plain MOVE, so a resting or
+        partially folded hand can never grab a mouse button.
+        """
+        t, idx, mid, ring, pinky = fingers
+
+        pinch_ratio = _norm_dist(lm[THUMB_TIP], lm[INDEX_TIP]) / \
+            max(hand_size, 1e-4)
+        if self._pinch_engaged:
+            if pinch_ratio > PINCH_RELEASE:
+                self._pinch_engaged = False
+        elif pinch_ratio < PINCH_ENGAGE:
+            self._pinch_engaged = True
+        if self._pinch_engaged:
+            return "pinch"
+
+        if idx and mid and not ring and not pinky:
+            return "peace"
+        if idx and mid and ring and not pinky:
+            return "three"
+        if idx and not mid and not ring and not pinky:
+            return "index"
+        if not t and not idx and not mid and not ring and not pinky:
+            return "fist"
+        return "open"
+
+    def _arm_if_needed(self, hand_size):
+        """Update the reached-for-screen arming latch with hysteresis."""
+        if self._armed:
+            if hand_size < DISARM_SIZE:
+                self._armed = False
+        elif hand_size >= ARM_SIZE:
+            self._armed = True
+        return self._armed
+
     def _handle_landmarks(self, lm):
         """Classify the hand and drive the mouse.
 
@@ -293,33 +371,48 @@ class HandCursorEngine:
             self._finger_ext(lm, RING_PIP, RING_TIP),
             self._finger_ext(lm, PINKY_PIP, PINKY_TIP),
         ]
-        t_ext, idx_ext, mid_ext, ring_ext, pinky_ext = fingers
         n_up = sum(fingers)
-
-        hand_size = max(_norm_dist(lm[WRIST], lm[MIDDLE_MCP]), 1e-4)
-        pinch = _norm_dist(lm[THUMB_TIP], lm[INDEX_TIP]) / hand_size < PINCH_RATIO
+        hand_size = self._hand_size_norm(lm)
 
         tip = lm[INDEX_TIP]
         x, y = self._to_screen(tip)
 
-        # ---- pick a mode --------------------------------------------------
-        if pinch:
-            mode = "pinch"
-        elif idx_ext and mid_ext and not ring_ext and not pinky_ext:
-            mode = "peace"
-        elif idx_ext and mid_ext and ring_ext and not pinky_ext:
-            mode = "three"
-        elif idx_ext and not mid_ext and not ring_ext and not pinky_ext:
-            mode = "index"
-        elif n_up == 0:
-            mode = "fist"
-        else:
-            mode = "open"
+        # ---- 1) Reach gate: only control the cursor near the screen --------
+        if not self._arm_if_needed(hand_size):
+            self._release_button()
+            self._release_button(right=True)
+            self._candidate = None
+            self._candidate_frames = 0
+            label = "REACH TOWARD SCREEN" if not self._armed \
+                else "MOVING AWAY?"
+            self._emit_state(label, None)
+            return "REACH TOWARD SCREEN", fingers
 
-        if mode != self._mode:
-            self._mode = mode
+        # ---- 2) classify + debounce (STABLE_FRAMES) -------------------------
+        candidate = self._classify(lm, fingers, hand_size)
+        if candidate == self._candidate:
+            self._candidate_frames += 1
+        else:
+            self._candidate = candidate
+            self._candidate_frames = 1
+
+        if (self._candidate_frames >= STABLE_FRAMES and
+                candidate != self._mode):
+            self._mode = candidate
+            self._mode_since = time.time()
             self._scroll_base_y = None
             self._scroll_acc = 0.0
+
+        mode = self._mode
+        if candidate != mode or mode is None:
+            # Still proving the new pose, or it flickered away: do NO click
+            # action yet, just follow the fingertip and release any buttons.
+            self._release_button()
+            self._release_button(right=True)
+            self._move_pointer(x, y)
+            label = "READY"
+            self._emit_state(label, (x, y))
+            return label, fingers
 
         label = None
         if mode == "pinch":
@@ -366,7 +459,7 @@ class HandCursorEngine:
             self._release_button(right=True)
             self._move_pointer(x, y)
             label = "INDEX = MOVE" if n_up == 1 else \
-                    ("OPEN HAND = MOVE" if n_up == 5 else "MOVE")
+                    ("OPEN HAND = MOVE" if n_up >= 4 else "MOVE")
             self._emit_state(label, (x, y))
 
         return label, fingers
@@ -446,7 +539,8 @@ class HandCursorEngine:
         )
         self._send("started",
                    f"Hand cursor started on camera {self.camera_index}.")
-        self._send("log", "Gestures: index/open=move  pinch=click  "
+        self._send("log", "Bring your hand close to the screen to arm the "
+                          "cursor. Gestures: index/open=move  pinch=click  "
                           "peace=scroll  three=right click  fist=drag.")
 
         frame_dt = 1.0 / MAX_FPS
