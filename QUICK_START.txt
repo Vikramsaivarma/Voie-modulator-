@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v5.0)
+VOICE CONTROL - QUICK START GUIDE  (v5.1)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -8,10 +8,11 @@ offline voice feedback (pyttsx3), a "what the app heard" display,
 Gemini-powered answers + SCREEN VISION + CURSOR VISION (region grab),
 Gemini SESSION MEMORY, TTS voice profiles (voice + speed), AUDIBLE CLICK
 BEEPS, AUTO-START on login, ACTIVITY LOG saved to voc_log.txt, TIMERS/
-REMINDERS, CLIPBOARD HISTORY, AUTO-BEST microphone selection, and a
-HAND-CURSOR air mouse: use your webcam to move the pointer and "touch"
-the screen with finger gestures (with a live 5-finger state panel on the
-preview).
+REMINDERS (with toast popups), CLIPBOARD HISTORY (with a click-to-paste
+card), CHAINED COMMANDS ("open chrome then search weather"), WAKE WORD
+("hey vo"), AUTO-BEST microphone selection, and a HAND-CURSOR air mouse:
+use your webcam to move the pointer and "touch" the screen with finger
+gestures (with a live 5-finger state panel on the preview).
 
 --------------------------------------------------------------------------------
 1) REQUIREMENTS
@@ -116,16 +117,29 @@ By default Windows may pick a noisy or acoustic microchip. If the app
       Use the "Voice:" dropdown (Windows SAPI5 voices, discovered live on
       first speech) and the "Speed:" slider in the MICROPHONE & VOICE card.
 
-  TIMERS & REMINDERS:
-      "Set a timer for 5 minutes"
-      "Set a timer for 1 hour 30 minutes"
-      "Remind me in 10 minutes to stretch"
-   -> When the time is up the app logs + speaks the reminder.
+TIMERS & REMINDERS:
+       "Set a timer for 5 minutes"
+       "Set a timer for 1 hour 30 minutes"
+       "Remind me in 10 minutes to stretch"
+    -> When the time is up the app pops a small always-on-top toast
+       (click it to dismiss) and speaks the reminder.
 
-  CLIPBOARD HISTORY:
-      The app silently remembers the last 8 things you copied.
-      "What did I copy"    "Show my clipboard"
-   -> Prints the remembered entries in the log.
+   CHAINED COMMANDS:
+       "Open chrome then search the weather"
+       "Open notepad and then press enter"
+       "Type hello then press enter"
+    -> Commands split on " then " / " and then " and run one after the
+       other (about 0.6 s apart). A question that merely contains "then"
+       (for example "what came first then why") goes to Gemini instead.
+
+   WAKE WORD:
+       "Stop Listening" pauses the mic. Re-arm it hands-free with:
+       "Hey vo"   "OK vo"   "Wake up vo"   "Hi vo"   (or "Start Listening")
+
+   CLIPBOARD CARD:
+       The GUI shows your last few copied entries. Click any row to paste
+       it into the focused window.
+       "What did I copy"    "Show my clipboard"   -> spoken + log list.
 
 --------------------------------------------------------------------------------
 6) AIR CURSOR / HAND CONTROL (webcam "touch")
@@ -148,6 +162,9 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
       CALIBRATE REACH -> two-phase wizard (rest your hand, then reach toward
       the screen) that writes your personal ARM/DISARM reach thresholds into
       voc_config.json so the cursor ignores a hand resting on your lap.
+      While it runs, a live readout next to the button shows your current
+      hand size and which pose is being measured: "size 0.31 (REST)" or
+      "size 0.52 (REACH)".
 
   * RAISE-GATED cursor (v1.4): the cursor only controls the mouse while your
     hand is CLOSE to the screen. Rest your hand on your lap or near the
@@ -217,6 +234,18 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     "What did I copy"   /   "Show my clipboard"
     "Start the app on login" / "Turn off auto start"
 
+  CHAINED COMMANDS:
+    "Open chrome then search the weather"
+    "Open notepad and then type hello"
+    "Search cat videos then minimize"
+
+  LIFECYCLE:
+    "Stop Listening" -> pauses; resume with "Start Listening"
+        (or hands-free: "Hey vo" / "OK vo" / "Wake up vo")
+    "Start Hand Cursor" / "Stop Hand Cursor"  -> air mouse on/off
+    "Help"             -> app reads the command list aloud
+    "Quit" / "Exit"    -> closes the app
+
   UTILITIES:
     "What time is it"   /   "What date is it today"
     "Take a note: buy milk"            -> appends to voc_notes.txt
@@ -225,13 +254,6 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     "Open YouTube" "Open Gmail" "Open Google Drive" "Open Maps"
     "Shut down the computer"   "Restart the computer"
     "Put the computer to sleep"
-
-  LIFECYCLE:
-    "Stop Listening"   -> pauses; say "Start Listening" to resume
-    "Start Listening"
-    "Start Hand Cursor" / "Stop Hand Cursor"  -> air mouse on/off
-    "Help"             -> app reads the command list aloud
-    "Quit" / "Exit"    -> closes the app
 
   TIPS:
     * For "Type ..." / "Search ...", click into the target field FIRST,
@@ -314,6 +336,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
+  test_v51.py         Dev-only smoke test suite for the v5.1 features
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!

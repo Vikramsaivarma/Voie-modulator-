@@ -32,6 +32,18 @@
    Windows (HKCU Run key).
  * ACTIVITY LOG: every log line is also persisted to voc_log.txt next to
    the app (capped at ~2000 lines).
+ * CHAINED COMMANDS (v5.1): say "open chrome then search the weather" and
+   the app runs each step in order (split on " then " / " and then ").
+ * WAKE WORD (v5.1): after "stop listening" / pause, say "hey vo" or
+   "wake up" to resume listening hands-free.
+ * CLIPBOARD CARD (v5.1): the GUI now lists your recent clipboard entries
+   - click any row to paste it into the focused window.
+ * TIMER TOASTS (v5.1): when a timer/reminder finishes, the app pops a
+   small always-on-top notification (click to dismiss) in addition to
+   speaking the reminder.
+ * CALIBRATION FEEDBACK (v5.1): while CALIBRATE REACH runs, a live
+   "size X.XX (REST/REACH)" readout shows the current hand size so you
+   can see which pose the app is measuring.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -82,7 +94,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.0.0
+VERSION   : 5.1.0
 ================================================================================
 """
 
@@ -396,19 +408,21 @@ class VoiceControlApp:
         "describe it: say screen analysis. I can describe what is near your "
         "mouse: say what is under my cursor. I can set timers: say set a "
         "timer for 5 minutes, or set a reminder at 3 o'clock. I remember "
-        "your clipboard: say what did I copy. I also tell the time and "
-        "date, take notes after the word note, do math like calculate 15 "
-        "percent of 240, open sites like youtube, gmail and maps, shut "
-        "down the computer, restart it, put it to sleep, and lock the "
-        "screen. Say clear my memory to reset my conversation context. "
-        "Use AUTO-BEST in the app to pick the best microphone. Say stop "
-        "listening to pause, start listening to resume, and help for this "
-        "message. I also control the mouse cursor with your hand: raise "
-        "your index finger or open hand to move, pinch to click, three "
-        "fingers for a right click, make a peace sign to scroll, and make "
-        "a fist to drag. Say start hand cursor or stop hand cursor to "
-        "switch it on or off. Confirmations are audible when click/beep "
-        "sounds are enabled."
+        "your clipboard: say what did I copy, or click an entry in the "
+        "clipboard card to paste it. Chain commands with the word then - "
+        "for example: open chrome, then search the weather. I also tell "
+        "the time and date, take notes after the word note, do math like "
+        "calculate 15 percent of 240, open sites like youtube, gmail and "
+        "maps, shut down the computer, restart it, put it to sleep, and "
+        "lock the screen. Say clear my memory to reset my conversation "
+        "context. Use AUTO-BEST in the app to pick the best microphone. "
+        "Say stop listening to pause, start listening, hey vo, or wake up "
+        "to resume, and help for this message. I also control the mouse "
+        "cursor with your hand: raise your index finger or open hand to "
+        "move, pinch to click, three fingers for a right click, make a "
+        "peace sign to scroll, and make a fist to drag. Say start hand "
+        "cursor or stop hand cursor to switch it on or off. Confirmations "
+        "are audible when click beep sounds are enabled."
     )
 
     GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon",
@@ -455,6 +469,7 @@ class VoiceControlApp:
         self._clip_lock = threading.Lock()
         self._last_clip_value = None
         self._clip_watch_started = False
+        self._last_rendered_clips = None
 
         # Worker thread control.
         self._listening_event = threading.Event()
@@ -760,6 +775,11 @@ class VoiceControlApp:
             command=self._on_beep_toggle,
         ).pack(side=tk.LEFT, padx=(10, 0))
 
+        self.hand_size_var = tk.StringVar(value="")
+        tk.Label(hand_sliders, textvariable=self.hand_size_var,
+                 font=(FONT_NAME, 7), bg=SUBTLE_BG, fg=ACCENT).pack(
+            side=tk.LEFT, padx=(12, 0))
+
         self.preview_canvas = tk.Label(
             hand_card, bg=LOG_BG_COLOR, text="(preview turned off)",
             font=(FONT_NAME, 8), fg=MUTED,
@@ -777,6 +797,27 @@ class VoiceControlApp:
         )
         heard_label.pack(fill=tk.X, pady=(0, 8), ipady=4)
         self.heard_label = heard_label
+
+        # --- Clipboard manager card (click an entry to paste it) ---------
+        clip_card = tk.Frame(body, bg=SUBTLE_BG, bd=1,
+                             highlightbackground="#30363d",
+                             highlightthickness=1)
+        clip_card.pack(fill=tk.X, pady=(0, 8))
+
+        clip_head = tk.Frame(clip_card, bg=SUBTLE_BG)
+        clip_head.pack(fill=tk.X, padx=12, pady=(6, 2))
+        tk.Label(clip_head, text="CLIPBOARD  (click to paste)",
+                 font=(FONT_NAME, 9, "bold"), bg=SUBTLE_BG,
+                 fg=ACCENT).pack(side=tk.LEFT)
+        tk.Label(clip_head, text="Say: what did I copy",
+                 font=(FONT_NAME, 7), bg=SUBTLE_BG, fg=MUTED).pack(
+            side=tk.RIGHT)
+
+        self.clip_box = tk.Frame(clip_card, bg=SUBTLE_BG)
+        self.clip_box.pack(fill=tk.X, padx=12, pady=(0, 8))
+        tk.Label(self.clip_box, text="(nothing copied yet)",
+                 font=(FONT_NAME, 8), bg=SUBTLE_BG, fg=MUTED,
+                 anchor="w").pack(fill=tk.X)
 
         # --- Command / activity log -------------------------------------
         log_card = tk.Frame(body, bg=SUBTLE_BG, bd=1,
@@ -802,10 +843,11 @@ class VoiceControlApp:
 
         tk.Label(
             self.root,
-            text="Say: Open <app> | Type <text> | Search <query> | "
-                 "Ask <question> | Analyze screen | Set timer | "
-                 "What did I copy | New/Close/Next Tab | Minimize | "
-                 "Lock Screen | Stop Listening | Help | Start/Stop Hand Cursor",
+text="Say: Open <app> | Type <text> | Search <query> | "
+             "Ask <question> | Analyze screen | What's under my cursor | "
+             "Set timer | What did I copy | Open Chrome then search... | "
+             "New/Close/Next Tab | Minimize | Lock Screen | "
+             "Stop Listening | Help | Start/Stop Hand Cursor",
             font=(FONT_NAME, 8), bg=BG_COLOR, fg=ACCENT,
             wraplength=640, justify=tk.LEFT,
         ).pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=4)
@@ -1093,6 +1135,7 @@ class VoiceControlApp:
                     self.auto_btn.config(state="normal")
                 elif kind == "timer":
                     self._append_log(data)
+                    self._show_toast("Timer", data)
                 elif kind == "clipcard":
                     self._append_log(data)
                 elif kind == "beep":
@@ -1131,6 +1174,7 @@ class VoiceControlApp:
                 return
             except tk.TclError:
                 return
+        changed = False
         try:
             value = self.root.clipboard_get()
             if (value and isinstance(value, str) and
@@ -1140,10 +1184,15 @@ class VoiceControlApp:
                     if len(self._clip_history) > 8:
                         self._clip_history = self._clip_history[-8:]
                 self._last_clip_value = value
+                changed = True
         except tk.TclError:
             pass
         except Exception:
             pass
+        with self._clip_lock:
+            current = list(self._clip_history)
+        if changed or current != self._last_rendered_clips:
+            self._render_clip_card(current)
         try:
             self.root.after(1200, self._watch_clipboard)
         except tk.TclError:
@@ -1161,6 +1210,54 @@ class VoiceControlApp:
             short = item.replace("\n", " ").strip()
             lines.append(f"  - {short[:90]}")
         return "\n".join(lines)
+
+    def _render_clip_card(self, entries):
+        """Rebuild the clipboard card rows (newest first, click to paste)."""
+        try:
+            for widget in self.clip_box.winfo_children():
+                widget.destroy()
+        except (tk.TclError, AttributeError):
+            return
+        self._last_rendered_clips = list(entries)
+        if not entries:
+            try:
+                tk.Label(self.clip_box, text="(nothing copied yet)",
+                         font=(FONT_NAME, 8), bg=SUBTLE_BG, fg=MUTED,
+                         anchor="w").pack(fill=tk.X)
+            except (tk.TclError, AttributeError):
+                pass
+            return
+        for idx, item in enumerate(reversed(entries[-4:])):
+            short = item.replace("\n", " ").strip()
+            row = tk.Frame(self.clip_box, bg=SUBTLE_BG)
+            row.pack(fill=tk.X, pady=1)
+            label = tk.Label(
+                row, text=f"{idx + 1}. {short[:70]}",
+                font=(FONT_NAME, 8), bg=SUBTLE_BG, fg="#e6edf3",
+                anchor="w", cursor="hand2",
+                activebackground="#1f242c",
+                activeforeground=ACCENT, wraplength=560,
+            )
+            label.pack(fill=tk.X)
+            label.bind("<Button-1>",
+                       lambda _e, text=item: self._paste_clip(text))
+
+    def _paste_clip(self, text):
+        """Copy a remembered clipboard entry and paste it (GUI thread)."""
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            self._last_clip_value = text
+        except Exception as exc:
+            self._append_log(f"[!] Clipboard paste error: {exc}")
+            return
+        self._append_log(f"[i] Pasted clipboard entry: "
+                         f"{text.replace(chr(10), ' ').strip()[:60]}")
+        try:
+            import pyautogui as _pg
+            _pg.hotkey("ctrl", "v")
+        except Exception as exc:
+            self._append_log(f"[!] Paste keystroke error: {exc}")
 
     # ------------------------------------------------------------------
     # Timer / reminder runner (worker thread)
@@ -1347,6 +1444,45 @@ class VoiceControlApp:
             winsound.Beep(tone, 60)
         except (OSError, RuntimeError):
             pass  # beep unavailable - never crash the GUI poller
+
+    def _show_toast(self, title, message, duration_ms=6000):
+        """Show a small, always-on-top toast popup that auto-dismisses.
+
+        GUI thread only (called from the queue poller / GUI callbacks).
+        """
+        try:
+            toast = tk.Toplevel(self.root)
+            toast.title(title)
+            toast.overrideredirect(True)   # frameless mini-popup
+            toast.attributes("-topmost", True)
+            toast.configure(bg=SUBTLE_BG)
+            frame = tk.Frame(toast, bg="#1f2329", bd=1,
+                             highlightbackground="#58a6ff",
+                             highlightthickness=1)
+            frame.pack(fill="both", expand=True)
+            tk.Label(frame, text=title.upper(), font=(FONT_NAME, 9, "bold"),
+                     bg="#1f2329", fg="#58a6ff").pack(
+                anchor="w", padx=10, pady=(6, 0))
+            tk.Label(frame, text=message, font=(FONT_NAME, 9),
+                     bg="#1f2329", fg="#e6edf3", justify="left",
+                     wraplength=320).pack(anchor="w", padx=10,
+                                          pady=(2, 8))
+            # Position near the bottom-right corner of the screen.
+            screen_w = self.root.winfo_screenwidth()
+            screen_h = self.root.winfo_screenheight()
+            toast.update_idletasks()
+            w = toast.winfo_reqwidth()
+            h = toast.winfo_reqheight()
+            toast.geometry(f"+{screen_w - w - 24}+{screen_h - h - 80}")
+            toast.bind("<Button-1>", lambda _e: toast.destroy())
+            toast.after(duration_ms, toast.destroy)
+            # Keep a reference so the Toplevel is not garbage-collected.
+            if not hasattr(self, "_toast_refs"):
+                self._toast_refs = []
+            self._toast_refs.append(toast)
+            self._toast_refs = self._toast_refs[-5:]
+        except (tk.TclError, AttributeError, OSError):
+            pass  # toast is cosmetic - never crash on failure
 
     def _set_running(self, running):
         """Enable/disable buttons to match listening state."""
@@ -1639,9 +1775,37 @@ class VoiceControlApp:
     # ------------------------------------------------------------------
     # Command parsing and execution (worker thread)
     # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_chain(lowered):
+        """Return list of sequential command parts, or None if not a chain.
+
+        Strings containing ' then ' or ' and then ' are split but only
+        when every resulting segment looks like a real voice command
+        (≥2 words, or a recognised single-word action verb).
+        """
+        if not (re.search(r"\bthen\b", lowered) or
+                re.search(r"\band then\b", lowered)):
+            return None
+        parts = re.split(r"\s+(?:and\s+)?then\s+", lowered, maxsplit=5)
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) < 2:
+            return None
+
+        def _chainable(part):
+            words = part.split()
+            if len(words) >= 2:
+                return True
+            return part in ("start", "stop", "help", "refresh",
+                            "minimize", "maximize", "mute", "enter",
+                            "undo", "paste", "copy")
+        return parts if all(_chainable(p) for p in parts) else None
+
     def handle_command(self, phrase):
         """
         Match a spoken phrase against known commands.
+
+        Phrases containing " then " or " and then " are split and executed
+        sequentially so multi-step chains work naturally.
 
         Unknown (but sufficiently long) phrases are forwarded to Gemini
         and the answer is shown in the log and spoken aloud.
@@ -1651,11 +1815,26 @@ class VoiceControlApp:
         if not lowered:
             return
 
+        # ============ Multi-step command chaining ===========================
+        chain = self._parse_chain(lowered)
+        if chain is not None:
+            self._post("log", f"[i] Chained command ({len(chain)} steps): "
+                              " + ".join(chain))
+            for i, part in enumerate(chain):
+                if i > 0:
+                    time.sleep(0.6)
+                self.handle_command(part)
+            return
+
         # ============ Paused / suspended state ==========================
         if self._suspended:
             if re.search(r"(?:^|\b)(?:please\s+|now\s+|okay\s+)?start "
-                         r"listening\b", lowered) or lowered in (
-                "resume", "resume listening", "wake up", "continue"):
+                         r"listening\b", lowered) or \
+               re.search(r"\b(hey|hi)\s+(vo|voice|vak)\b", lowered) or \
+               lowered in (
+                "resume", "resume listening", "wake up", "continue",
+                "hey vo", "hey voice", "hey vak",
+                "vo", "wake up vo", "ok vo"):
                 self._suspended = False
                 self._post("status", "Listening...")
                 self._post("log", "Voice control resumed.")
@@ -2524,7 +2703,20 @@ class VoiceControlApp:
             self.voice_var.set(saved)
 
     def _on_hand_size(self, hand_size):
-        """Collect live hand-size samples while calibration is active."""
+        """Collect live hand-size samples while calibration is active.
+
+        Also shows the live normalised hand size during calibration so the
+        user gets instant visual feedback on the "rest vs reach" poses.
+        """
+        try:
+            if self._calibrating:
+                phase_name = "REST" if self._calib_phase == 1 else "REACH"
+                self.hand_size_var.set(
+                    f"size {hand_size:.2f} ({phase_name})")
+            elif hand_size > 0:
+                self.hand_size_var.set(f"size {hand_size:.2f}")
+        except (tk.TclError, AttributeError):
+            pass
         if self._calibrating:
             self._calib_samples.append(hand_size)
             self._calib_target -= 1
@@ -2593,6 +2785,10 @@ class VoiceControlApp:
 
     def _calibrate_done(self):
         self._calibrating = False
+        try:
+            self.hand_size_var.set("")  # stop showing the live size
+        except (tk.TclError, AttributeError):
+            pass
         self._calib_phase = 0
         self._calib_samples = []
         self._calib_rest = []
