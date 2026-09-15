@@ -15,10 +15,23 @@
    and scrolls (peace sign). A 5-finger panel shows each finger live.
  * SCREEN VISION: "analyze screen / what is on my screen" sends a
    screenshot to Gemini and reads the answer aloud (vision model).
+ * CURSOR VISION: "what is under my cursor" grabs the region around the
+   mouse pointer and Gemini describes it.
+ * GEMINI MEMORY: the app keeps the last few Q&A turns in a session
+   context, so follow-up questions ("and this one?") have context.
+   "clear my memory / forget" resets that context.
  * TIMER / REMINDER commands: "set a timer for 5 minutes",
    "set a reminder at 3 o'clock to drink water".
  * CLIPBOARD HISTORY: the app tracks the last few things you copied and
    can replay them ("what did I copy", "show my clipboard").
+ * TTS PROFILES: pick the Windows SAPI5 voice and the reading speed from
+   the GUI (Speed slider + Voice dropdown).
+ * CLICK BEEPS: hand clicks/drags play a short confirmation tone,
+   toggleable with the Beep checkbox.
+ * AUTO-START: "Run on login" checkbox registers the app to start with
+   Windows (HKCU Run key).
+ * ACTIVITY LOG: every log line is also persisted to voc_log.txt next to
+   the app (capped at ~2000 lines).
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -69,8 +82,8 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 4.2.0
-===============================================================================
+VERSION   : 5.0.0
+================================================================================
 """
 
 import array
@@ -84,10 +97,13 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 import webbrowser
+import winsound
+import winreg
 from collections import deque
 from tkinter import scrolledtext, messagebox
 from urllib.parse import quote_plus
@@ -283,11 +299,17 @@ DEFAULT_CONFIG = {
     "show_preview": True,       # embed the camera view in the GUI
     "hand_arm_size": None,      # None = default reach gate (auto-calibratable)
     "hand_disarm_size": None,   # None = default reach gate (auto-calibratable)
+    "click_beep": True,         # audible click/drag confirmation beep
+    "autostart": False,         # auto-start on Windows login
+    "voice_id": "",             # "" = default SAPI5 voice; set by dropdown
 }
 
 # Windows user32 functions used for window control and virtual keys.
 user32 = ctypes.windll.user32
 
+LOG_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "voc_log.txt"
+)
 
 # ----------------------------------------------------------------------
 # Small helper functions
@@ -371,19 +393,22 @@ class VoiceControlApp:
         "and paste, type text after the word type, and search after the "
         "word search. I answer questions after the word ask, and questions "
         "open a Chrome search as well. I can look at your screen and "
-        "describe it: say screen analysis. I can set timers: say set a "
+        "describe it: say screen analysis. I can describe what is near your "
+        "mouse: say what is under my cursor. I can set timers: say set a "
         "timer for 5 minutes, or set a reminder at 3 o'clock. I remember "
         "your clipboard: say what did I copy. I also tell the time and "
-         "date, take notes after the word note, do math like calculate 15 "
-         "percent of 240, open sites like youtube, gmail and maps, shut "
-         "down the computer, restart it, put it to sleep, and lock the "
-         "screen. Use AUTO-BEST in the app to "
-        "pick the best microphone. Say stop listening to pause, start "
-        "listening to resume, and help for this message. I also control "
-        "the mouse cursor with your hand: raise your index finger or open "
-        "hand to move, pinch to click, three fingers for a right click, "
-        "make a peace sign to scroll, and make a fist to drag. Say start "
-        "hand cursor or stop hand cursor to switch it on or off."
+        "date, take notes after the word note, do math like calculate 15 "
+        "percent of 240, open sites like youtube, gmail and maps, shut "
+        "down the computer, restart it, put it to sleep, and lock the "
+        "screen. Say clear my memory to reset my conversation context. "
+        "Use AUTO-BEST in the app to pick the best microphone. Say stop "
+        "listening to pause, start listening to resume, and help for this "
+        "message. I also control the mouse cursor with your hand: raise "
+        "your index finger or open hand to move, pinch to click, three "
+        "fingers for a right click, make a peace sign to scroll, and make "
+        "a fist to drag. Say start hand cursor or stop hand cursor to "
+        "switch it on or off. Confirmations are audible when click/beep "
+        "sounds are enabled."
     )
 
     GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon",
@@ -445,6 +470,7 @@ class VoiceControlApp:
         self._tts_thread = threading.Thread(
             target=self._tts_loop, name="tts", daemon=True)
         self._tts_thread.start()
+        self._voice_id_by_name = {}
 
         # Allow a couple of Google recognition calls to run in parallel with
         # live capture (barge-in) without flooding the API.
@@ -452,6 +478,10 @@ class VoiceControlApp:
 
         # Reused HTTP session keeps the Gemini connection alive between calls.
         self._http = requests.Session()
+        # Gemini session memory: keeps the last few turns so follow-up
+        # questions ("and this one?" / "expand that") have context.
+        self._gemini_history = []   # list of (role, text) pairs
+        self._gemini_lock = threading.Lock()
 
         self._build_gui()
 
@@ -527,6 +557,43 @@ class VoiceControlApp:
 
         self._apply_device_selection(device_choices)
         settings.columnconfigure(0, weight=1)
+
+        # --- TTS voice + reading speed ----------------------------------
+        tts_row = tk.Frame(voice, bg=SUBTLE_BG)
+        tts_row.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        tk.Label(tts_row, text="Voice:", font=SMALL_FONT,
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT)
+        self.voice_var = tk.StringVar(value="Default")
+        self.voice_menu = tk.OptionMenu(
+            tts_row, self.voice_var, "Default",
+            command=self._on_voice_change,
+        )
+        self.voice_menu.config(bg=BG_COLOR, fg=FG_COLOR,
+                               highlightthickness=1,
+                               highlightbackground="#30363d")
+        self.voice_menu.pack(side=tk.LEFT, padx=(4, 14))
+
+        tk.Label(tts_row, text="Speed:", font=SMALL_FONT,
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT)
+        self.tts_rate_var = tk.IntVar(
+            value=int(self.config.get("voice_rate", 180)))
+        tk.Scale(tts_row, from_=80, to=320, resolution=5,
+                 orient=tk.HORIZONTAL, variable=self.tts_rate_var,
+                 command=self._on_rate_change, length=150, showvalue=True,
+                 bg=SUBTLE_BG, fg=MUTED, troughcolor="#21262d",
+                 highlightthickness=0, bd=0,
+                 font=(FONT_NAME, 7)).pack(side=tk.LEFT)
+
+        self.autostart_var = tk.BooleanVar(
+            value=bool(self.config.get("autostart", False)))
+        tk.Checkbutton(
+            tts_row, text="Run on login", variable=self.autostart_var,
+            font=(FONT_NAME, 7), bg=SUBTLE_BG, fg=MUTED,
+            selectcolor=BG_COLOR, activebackground=SUBTLE_BG,
+            activeforeground=MUTED, highlightthickness=0, bd=0,
+            command=self._on_autostart_toggle,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         # --- Live voice-activity meter ----------------------------------
         meter_frame = tk.Frame(voice, bg=SUBTLE_BG)
@@ -682,6 +749,16 @@ class VoiceControlApp:
             command=self._calibrate_reach,
         )
         self.calib_btn.pack(side=tk.LEFT)
+
+        self.click_beep_var = tk.BooleanVar(
+            value=bool(self.config.get("click_beep", True)))
+        tk.Checkbutton(
+            hand_sliders, text="Beep", variable=self.click_beep_var,
+            font=(FONT_NAME, 7), bg=SUBTLE_BG, fg=MUTED,
+            selectcolor=BG_COLOR, activebackground=SUBTLE_BG,
+            activeforeground=MUTED, highlightthickness=0, bd=0,
+            command=self._on_beep_toggle,
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         self.preview_canvas = tk.Label(
             hand_card, bg=LOG_BG_COLOR, text="(preview turned off)",
@@ -967,7 +1044,8 @@ class VoiceControlApp:
         kind: "log" | "status" | "running" | "level" | "heard" |
               "threshold" | "autoselect" | "autodone" | "testdone" |
               "hand_state" | "hand_preview" | "hand_size" | "started" |
-              "stopped" | "error" | "quit"
+              "stopped" | "error" | "beep" | "tts_voices" |
+              "quit"
         """
         self._queue.put((kind, data))
 
@@ -1017,6 +1095,10 @@ class VoiceControlApp:
                     self._append_log(data)
                 elif kind == "clipcard":
                     self._append_log(data)
+                elif kind == "beep":
+                    self._play_beep(data)
+                elif kind == "tts_voices":
+                    self._populate_voice_menu(data)
                 elif kind == "quit":
                     self.on_close()
                     return
@@ -1182,15 +1264,89 @@ class VoiceControlApp:
             self._speak(self._shorten(answer, 240))
         self._post("status", "Listening...")
 
+    # ------------------------------------------------------------------
+    # Cursor-region vision (capture a region around the mouse + Gemini)
+    # ------------------------------------------------------------------
+    def _grab_cursor_region_png(self, radius=180):
+        """Grab a region around the mouse cursor and return PNG bytes."""
+        if not PIL_OK or ImageGrab is None:
+            return None
+        try:
+            import pyautogui as _pg
+            x, y = _pg.position()
+        except Exception:
+            return None
+        box = (x - radius, y - radius, x + radius, y + radius)
+        img = ImageGrab.grab(bbox=box)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _analyze_cursor_region(self, question):
+        """Worker-thread: capture a region around the mouse cursor."""
+        self._post("status", "Capturing cursor region...")
+        image = self._grab_cursor_region_png()
+        if not image:
+            self._post("log", "[!] Could not capture near the cursor.")
+            self._speak("I could not capture near your cursor.")
+            return
+        if not question:
+            question = ("Describe what is visible in this image. "
+                        "What is currently under the cursor?")
+        self._post("status", "Asking Gemini to describe cursor region...")
+        answer, error = self._ask_gemini_vision(question, image)
+        if error:
+            self._post("log", f"[!] {error}")
+            self._speak("I could not analyze that region.")
+        else:
+            self._post("log", f"\n[CURSOR REGION]\n{answer}")
+            self._speak(self._shorten(answer, 240))
+        self._post("status", "Listening...")
+
     def _append_log(self, line):
         """Insert a timestamped line (or multi-line block) into the log."""
         timestamp = time.strftime("%H:%M:%S")
         body = line if isinstance(line, str) else str(line)
+
+        # Persist every log line to voc_log.txt (keep the file capped at
+        # ~2000 lines so it never grows without bound).
+        try:
+            with open(LOG_FILE, "a", encoding="utf-8") as fh:
+                for part in body.split("\n"):
+                    fh.write(f"[{timestamp}] {part}\n")
+        except OSError:
+            pass
+        try:
+            if os.path.getsize(LOG_FILE) > 256 * 1024:
+                lines = []
+                with open(LOG_FILE, "r", encoding="utf-8") as fh:
+                    lines = fh.readlines()
+                with open(LOG_FILE, "w", encoding="utf-8") as fh:
+                    fh.writelines(lines[-2000:])
+        except OSError:
+            pass
+
         self.log_text.configure(state="normal")
         for part in body.split("\n"):
             self.log_text.insert(tk.END, f"[{timestamp}] {part}\n")
         self.log_text.see(tk.END)
         self.log_text.configure(state="disabled")
+
+    def _play_beep(self, kind):
+        """Play a short, distinct confirmation sound for hand clicks/drags.
+
+        kind: "left" (short click) | "right" | "drag" | "right_drag"
+        A higher-pitched tone is used for drag start so the user can tell
+        that the button is being held rather than clicked.
+        """
+        if not self.config.get("click_beep", True):
+            return
+        try:
+            tone = {"left": 1200, "right": 1500, "drag": 2200,
+                    "right_drag": 2200}.get(kind, 1200)
+            winsound.Beep(tone, 60)
+        except (OSError, RuntimeError):
+            pass  # beep unavailable - never crash the GUI poller
 
     def _set_running(self, running):
         """Enable/disable buttons to match listening state."""
@@ -1571,6 +1727,20 @@ class VoiceControlApp:
                              args=(question,), daemon=True).start()
             return
 
+        # ---- Cursor-region vision (what is under my cursor) ---------------
+        if re.search(r"\b(what (is|are)|describe|look at|scan|read)\b.*\b"
+                     r"(cursor|mouse|under my cursor|under the mouse)\b",
+                     lowered) or \
+           lowered in ("under my cursor", "under the mouse",
+                       "what is under my cursor", "what's under my cursor",
+                       "cursor region"):
+            m = re.search(r"\b(what|describe|explain|tell|read)\b.*",
+                          lowered, re.I)
+            question = m.group(0) if m else ""
+            threading.Thread(target=self._analyze_cursor_region,
+                             args=(question,), daemon=True).start()
+            return
+
         # ---- Timer / reminder --------------------------------------------
         m = re.match(
             r"(?:^|\b)(?:(?:set\s+(?:an?\s+)?(?:timer|alarm|remind(?:er)?))|"
@@ -1722,6 +1892,22 @@ class VoiceControlApp:
             self._post("log", "[i] Computer going to sleep.")
             return
 
+        # ---- Auto-start (run on login) ----------------------------------
+        if re.search(r"\b(start|launch|open|run)\b.*\b(on|with|at)\b.*"
+                     r"\b(login|startup|boot|windows)\b", lowered) or \
+           re.search(r"\b(auto ?start|run on login|start on boot)\b",
+                     lowered):
+            if re.search(r"\b(off|disable|don't|do not|no)\b", lowered):
+                self._set_autostart(False)
+                self.autostart_var.set(False)
+                self._speak("Auto start is now off.")
+            else:
+                self._set_autostart(True)
+                self.autostart_var.set(True)
+                self._speak("This app will start automatically when you "
+                            "sign in.")
+            return
+
         # ---- Volume -----------------------------------------------------
         if any(w in lowered for w in ("volume up", "increase volume",
                                       "up the volume", "louder")):
@@ -1861,6 +2047,15 @@ class VoiceControlApp:
                 self._speak("What should I search for?")
             return
 
+        # ============ "Clear memory" / forget the conversation ============
+        if re.search(r"\b(clear|forget|erase|reset)\b.*\b(memory|my "
+                     r"memory|conversation|chat)\b", lowered, re.I) or \
+           lowered in ("clear memory", "forget memory", "clear the chat",
+                       "forget everything", "clear the conversation"):
+            self.clear_gemini_memory()
+            self._speak("I cleared my memory.")
+            return
+
         # ============ "Ask <question>" or fallback to Gemini =============
         m = re.search(r"(?:^|\b)(?:ask|question)[\s:,]+(.*)", original, re.I)
         question = m.group(1) if m else original
@@ -1893,7 +2088,9 @@ class VoiceControlApp:
         """
         Send a text prompt to the Gemini API and return (answer, error).
 
-        Returns (answer_text, None) on success or (None, error_message).
+        Uses the in-session conversation history (see _gemini_history) so
+        follow-up questions have context. Returns (answer_text, None) on
+        success or (None, error_message).
         """
         api_key = (self.config.get("gemini_api_key") or
                    os.environ.get("GEMINI_API_KEY", ""))
@@ -1903,10 +2100,14 @@ class VoiceControlApp:
         model = self.config.get("gemini_model", "gemini-2.0-flash")
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={api_key}")
+        with self._gemini_lock:
+            history = list(self._gemini_history)[-16:]
+        contents = [{"parts": [{"text": text}]} for role, text in history]
+        contents.append({"parts": [{"text": question}]})
         try:
             resp = self._http.post(
                 url,
-                json={"contents": [{"parts": [{"text": question}]}]},
+                json={"contents": contents},
                 headers={"Content-Type": "application/json"},
                 timeout=30,
             )
@@ -1919,11 +2120,26 @@ class VoiceControlApp:
             texts = [p.get("text", "") for p in parts if p.get("text")]
             if not texts:
                 return None, "Gemini returned an empty answer."
-            return texts[0].strip(), None
+            answer = texts[0].strip()
+            with self._gemini_lock:
+                self._gemini_history.append(("user", question))
+                self._gemini_history.append(("model", answer))
+                self._gemini_history = self._gemini_history[-16:]
+            return answer, None
         except requests.exceptions.RequestException as exc:
             return None, f"Network error contacting Gemini: {exc}"
         except (ValueError, KeyError, IndexError) as exc:
             return None, f"Unexpected Gemini response: {exc}"
+
+    def clear_gemini_memory(self):
+        """Forget the current Gemini conversation context."""
+        with self._gemini_lock:
+            self._gemini_history = []
+        self._append_log("[i] Gemini conversation memory cleared.")
+
+    def _memory_size(self):
+        with self._gemini_lock:
+            return len(self._gemini_history)
 
     def _shorten(self, text, limit=220):
         """Return the first sentence(s) of text up to `limit` characters."""
@@ -2132,10 +2348,11 @@ class VoiceControlApp:
 
         The engine is created lazily on first use and kept alive for the
         whole session, which removes ~half a second of SAPI5 re-init delay
-        from every spoken reply.
+        from every spoken reply. The rate and voice are read from the config
+        on every item, so the Speed slider / Voice dropdown apply live.
         """
         engine = None
-        rate = int(self.config.get("voice_rate", 180))
+        engine_ready = False
         while True:
             text = self._tts_queue.get()
             if text is None:
@@ -2143,8 +2360,30 @@ class VoiceControlApp:
             try:
                 if engine is None:
                     engine = pyttsx3.init()
-                    engine.setProperty("rate", rate)
                     engine.setProperty("volume", 1.0)
+                    engine_ready = False
+                if not engine_ready:
+                    engine.setProperty("rate",
+                                       int(self.config.get("voice_rate", 180)))
+                    voice_id = self.config.get("voice_id", "")
+                    if voice_id:
+                        try:
+                            engine.setProperty("voice", voice_id)
+                        except Exception:
+                            pass
+                    engine_ready = True
+                    self._post_tts_voices(engine)
+                else:
+                    want_rate = int(self.config.get("voice_rate", 180))
+                    if int(engine.getProperty("rate")) != want_rate:
+                        engine.setProperty("rate", want_rate)
+                    want_voice = self.config.get("voice_id", "")
+                    if want_voice:
+                        try:
+                            if str(engine.getProperty("voice")) != want_voice:
+                                engine.setProperty("voice", want_voice)
+                        except Exception:
+                            pass
                 engine.say(text)
                 engine.runAndWait()
             except Exception as exc:
@@ -2155,6 +2394,18 @@ class VoiceControlApp:
                 except Exception:
                     pass
                 engine = None
+                engine_ready = False
+
+    def _post_tts_voices(self, engine):
+        """Gather SAPI5 voice names + ids and hand them to the GUI dropdown."""
+        try:
+            voices = list(engine.getProperty("voices"))
+            pairs = [(str(v.name).strip(), str(v.id))
+                     for v in voices if v and v.name]
+        except Exception:
+            pairs = []
+        if pairs:
+            self._post("tts_voices", pairs)
 
     def _speak(self, text, max_len=None):
         """Queue text for the persistent TTS thread (never blocks)."""
@@ -2166,6 +2417,32 @@ class VoiceControlApp:
             self._tts_queue.put(text)
         except Exception as exc:
             self._post("log", f"[!] Text-to-speech error: {exc}")
+
+    # ------------------------------------------------------------------
+    # Auto-start on Windows login
+    # ------------------------------------------------------------------
+    REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    REG_NAME = "VoiceControlApp"
+
+    def _set_autostart(self, enable):
+        """Add or remove a HKCU Run key so the app starts on login."""
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, self.REG_KEY,
+                                 0, winreg.KEY_SET_VALUE)
+            if enable:
+                python_exe = sys.executable
+                script = os.path.abspath(__file__)
+                val = f'"{python_exe}" "{script}"'
+                winreg.SetValueEx(key, self.REG_NAME, 0, winreg.REG_SZ, val)
+            else:
+                try:
+                    winreg.DeleteValue(key, self.REG_NAME)
+                except FileNotFoundError:
+                    pass
+            winreg.CloseKey(key)
+            self.config["autostart"] = bool(enable)
+        except OSError as exc:
+            self._post("log", f"[!] Could not change auto-start: {exc}")
 
     # ------------------------------------------------------------------
     # Hand cursor (air mouse / touch) - GUI tie-in
@@ -2199,6 +2476,52 @@ class VoiceControlApp:
         self.config["hand_scroll_speed"] = float(self.scroll_speed_var.get())
         if self._hand_engine is not None:
             self._hand_engine.set_scroll_speed(float(self.scroll_speed_var.get()))
+
+    def _on_beep_toggle(self):
+        self.config["click_beep"] = bool(self.click_beep_var.get())
+        if self.click_beep_var.get():
+            self._append_log("[i] Hand click sounds: ON")
+
+    def _on_autostart_toggle(self):
+        enable = bool(self.autostart_var.get())
+        self._set_autostart(enable)
+        state = "ON" if enable else "OFF"
+        self._append_log(f"[i] Auto-start on login: {state}")
+
+    def _on_rate_change(self, _val):
+        self.config["voice_rate"] = int(self.tts_rate_var.get())
+
+    def _on_voice_change(self, choice):
+        """Save the chosen TTS voice id; the TTS thread applies it live."""
+        if choice in ("Default", "", None):
+            self.config["voice_id"] = ""
+        else:
+            voice_id = self._voice_id_by_name.get(choice, "")
+            self.config["voice_id"] = voice_id
+        self._append_log(f"[i] TTS voice: {choice}")
+
+    def _populate_voice_menu(self, voices):
+        """Populate the TTS voice dropdown from the pyttsx3 engine.
+
+        voices: list of (name, voice_id) pairs reported by the TTS thread.
+        """
+        if not voices:
+            return
+        self._voice_id_by_name = {}
+        menu = self.voice_menu["menu"]
+        menu.delete(0, "end")
+        menu.add_command(label="Default",
+                         command=lambda v="Default": self.voice_var.set(v) or
+                         self._on_voice_change(v))
+        for name, voice_id in voices:
+            self._voice_id_by_name[name] = voice_id
+            menu.add_command(
+                label=name,
+                command=lambda v=name: self.voice_var.set(v) or
+                self._on_voice_change(v))
+        saved = self.config.get("voice_id", "")
+        if saved and saved in self._voice_id_by_name:
+            self.voice_var.set(saved)
 
     def _on_hand_size(self, hand_size):
         """Collect live hand-size samples while calibration is active."""

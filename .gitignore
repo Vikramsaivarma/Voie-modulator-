@@ -1,4 +1,5 @@
 # Prevent secrets / local settings and caches from being committed.
 voc_config.json
+voc_log.txt
 __pycache__/
 *.pyc

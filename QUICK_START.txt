@@ -1,14 +1,17 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v4.2)
+VOICE CONTROL - QUICK START GUIDE  (v5.0)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
 Modern dark-themed GUI, live voice-activity WAVEFORM, Google speech-to-text,
 offline voice feedback (pyttsx3), a "what the app heard" display,
-Gemini-powered answers + SCREEN VISION, TIMERS/REMINDERS, CLIPBOARD
-HISTORY, AUTO-BEST microphone selection, and a HAND-CURSOR air mouse:
-use your webcam to move the pointer and "touch" the screen with finger
-gestures (with a live 5-finger state panel on the preview).
+Gemini-powered answers + SCREEN VISION + CURSOR VISION (region grab),
+Gemini SESSION MEMORY, TTS voice profiles (voice + speed), AUDIBLE CLICK
+BEEPS, AUTO-START on login, ACTIVITY LOG saved to voc_log.txt, TIMERS/
+REMINDERS, CLIPBOARD HISTORY, AUTO-BEST microphone selection, and a
+HAND-CURSOR air mouse: use your webcam to move the pointer and "touch"
+the screen with finger gestures (with a live 5-finger state panel on the
+preview).
 
 --------------------------------------------------------------------------------
 1) REQUIREMENTS
@@ -99,6 +102,20 @@ By default Windows may pick a noisy or acoustic microchip. If the app
    -> The app captures a screenshot, sends it to Gemini, shows the answer
       in the log and reads a short version aloud.
 
+  CURSOR VISION (look under the mouse pointer):
+      "What is under my cursor" / "Under my mouse" / "Describe the cursor region"
+   -> The app captures a region around the mouse pointer and Gemini
+      describes what is there - perfect for reading tooltips/small text.
+
+  GEMINI SESSION MEMORY:
+      The last few question/answer turns are kept as conversation context,
+      so follow-ups like "and what about the second one?" work.
+      "Clear my memory" / "Forget" resets that context.
+
+  TTS VOICE PROFILE:
+      Use the "Voice:" dropdown (Windows SAPI5 voices, discovered live on
+      first speech) and the "Speed:" slider in the MICROPHONE & VOICE card.
+
   TIMERS & REMINDERS:
       "Set a timer for 5 minutes"
       "Set a timer for 1 hour 30 minutes"
@@ -127,11 +144,12 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   * The HAND CURSOR row has live tuning controls:
       Sens slider  -> pointer speed/mapping (1.0 = full frame, raise to zoom)
       Scroll slider-> how fast the peace sign scrolls
+      Beep box     -> audible confirmation tone on every click / drag
       CALIBRATE REACH -> two-phase wizard (rest your hand, then reach toward
       the screen) that writes your personal ARM/DISARM reach thresholds into
       voc_config.json so the cursor ignores a hand resting on your lap.
 
-  * RAISE-GATED cursor (v1.3): the cursor only controls the mouse while your
+  * RAISE-GATED cursor (v1.4): the cursor only controls the mouse while your
     hand is CLOSE to the screen. Rest your hand on your lap or near the
     keyboard and it does NOTHING - no ghost moves, no ghost clicks. Reach
     toward the screen to arm it; bring it closer still to hover/click.
@@ -157,6 +175,10 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     hand_arm_size       reach-gate threshold from CALIBRATE (or None)
     hand_disarm_size    reach-gate threshold from CALIBRATE (or None)
     hand_mode           "on" = webcam starts with the app, "off" = manual
+    click_beep          true/false = audible click/drag confirmation tones
+    voice_rate          TTS reading speed (80-320, 180 default)
+    voice_id            Windows SAPI5 voice id ("" = default)
+    autostart           true/false = start the app when you sign in
 
 -------------------------------------------------------------------------------
 7) VOICE COMMANDS
@@ -188,11 +210,14 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   AI:
     "Ask what is the capital of France"
     "Analyze screen" / "What is on my screen"   (Gemini screen vision)
+    "What is under my cursor"                    (Gemini cursor vision)
+    "Clear my memory" / "Forget"                 (reset Gemini context)
     "Set a timer for 10 minutes"
     "Remind me in 5 minutes to take a break"
     "What did I copy"   /   "Show my clipboard"
+    "Start the app on login" / "Turn off auto start"
 
-  UTILITIES (NEW in v4.2):
+  UTILITIES:
     "What time is it"   /   "What date is it today"
     "Take a note: buy milk"            -> appends to voc_notes.txt
     "Calculate 15 percent of 240"      -> safe on-device math
@@ -288,6 +313,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   PLAN.txt            Product roadmap for the next versions
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
+  voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!

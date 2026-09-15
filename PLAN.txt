@@ -5,8 +5,10 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v4.2 works end-to-end (voice, waveform UI, timers, clipboard history,
-screen vision, math, notes, sites, power, reach-gated air cursor, live tuning).
+STATUS: v5.0 works end-to-end (voice, waveform UI, timers, clipboard history,
+screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
+log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
+live tuning).
 
 ------------------------------------------------------------------------------
 1) CURRENT ARCHITECTURE (v4.2)
@@ -22,19 +24,23 @@ screen vision, math, notes, sites, power, reach-gated air cursor, live tuning).
                  HAND CURSOR (start/stop/cam/preview/SENS slider/SCROLL
                  slider/CALIBRATE REACH), HEARD banner, ACTIVITY LOG,
                  status bar.
-  Command branches: app launch, browser, window, system keys, volume,
-  text, search, type, timer/reminder, clipboard, screen vision, time/date,
-  notes, calculator, site shortcuts, power, gestures, "open app", Gemini Q&A.
+Command branches: app launch, browser, window, system keys, volume,
+   text, search, type, timer/reminder, clipboard, screen vision, cursor
+   vision, Gemini memory ("clear my memory"), time/date, notes, calculator,
+   site shortcuts, power, autostart, gestures, "open app", Gemini Q&A.
+   TTS profiles (voice + Speed slider), click-beep toggles, autostart
+   checkbox. Every log line is also written to voc_log.txt (capped).
 
 - hand_cursor.py : MediaPipe hand engine (daemon thread).
-  v1.3: REACH GATE - cursor only arms when your hand is CLOSE to the screen
+  v1.4: REACH GATE - cursor only arms when your hand is CLOSE to the screen
         (per-user ARM_SIZE/DISARM_SIZE with hysteresis; CALIBRATE REACH in
         the GUI writes per-user values to voc_config.json). STABLE_FRAMES
         (5) debounce stops one-frame flickers. Pinch hysteresis
         (ENGAGE=0.28/RELEASE=0.55). Ambiguous poses (middle-only, thumbs-up)
         fall back to MOVE, never a button. Emits live hand_size samples so
         the app can calibrate. Live set_sensitivity/set_scroll_speed/
-        set_reach_thresholds work without restarting.
+        set_reach_thresholds work without restarting. Emits "beep" events
+        (left/right/drag) that the app converts into confirmation tones.
   Gestures: index/open = move, pinch = click/drag, peace = scroll,
             three fingers = right-click/drag, fist = drag.
   Never touches the GUI: pushes events through on_event/on_preview queue.
@@ -42,29 +48,30 @@ screen vision, math, notes, sites, power, reach-gated air cursor, live tuning).
 ------------------------------------------------------------------------------
 2) VISION - "ONE-COMMAND COMPUTER"  (roadmap)
 ------------------------------------------------------------------------------
-PHASE A - STABILITY & COMFORT  (most items DONE in v4.2)
+PHASE A - STABILITY & COMFORT  (mostly DONE in v4.2 / v5.0)
   [x] Calibration UI: two-phase wizard (rest hand, then reach toward screen)
       writes ARM_SIZE/DISARM_SIZE into voc_config.json (per-user distance).
   [x] Sensitivity slider wired live (engine.set_sensitivity, no restart).
   [x] Scroll-speed slider wired live (engine.set_scroll_speed, no restart).
   [x] Camera picker lists available_cameras() instead of fake "0..5".
-  [ ] Click confirmation sound (beep on recognised click/drag).
+  [x] Click confirmation sound (beep on recognised click/drag) - v5.0.
   [ ] Reach/dwell visual feedback on the overlay while calibrating.
   [ ] Gesture training screen with live pass/fail overlay feedback.
 
 PHASE B - SMARTER ASSISTANT
   [ ] Wake word ("hey vo") to arm mic without a global hotkey.
-  [ ] On-demand screen vision: "what's under my cursor" (region grab).
+  [x] On-demand cursor vision: "what's under my cursor" (region grab) - v5.0.
   [ ] Multi-step commands chained: "open chrome then search weather".
-  [ ] Gemini memory: short conversation context retained per session.
-  [ ] Voice profiles for TTS: rate/pitch/voice selectable in GUI.
+  [x] Gemini memory: short conversation context retained per session,
+      "clear my memory" resets it - v5.0.
+  [x] Voice profiles for TTS: voice dropdown + rate slider in GUI - v5.0.
 
 PHASE C - SYSTEM DEEP INTEGRATION (Windows)
   [ ] System tray icon + minimize-to-tray; global hotkey to re-open.
   [ ] Notification balloons for phrased events (timer, clipboard).
   [ ] Clipboard manager GUI card (click entry to paste).
-  [ ] Auto-start on boot option (registry Run / startup folder).
-  [ ] Activity log persistence to voc_log.txt.
+  [x] Auto-start on boot option (registry HKCU Run key) - v5.0.
+  [x] Activity log persistence to voc_log.txt (capped) - v5.0.
 
 PHASE D - GESTURE X / PRODUCTISATION
   [ ] Two-hand support (left = pointer, right = modifiers).
@@ -84,7 +91,7 @@ PHASE D - GESTURE X / PRODUCTISATION
 
 ------------------------------------------------------------------------------
 4) NEXT SHIPMENT (playbook for continuing)
-  1. Click confirmation sound + calibration overlay feedback (Phase A).
+  1. Gesture training screen + calibration overlay feedback (Phase A).
   2. Wake word to arm the mic hands-free (Phase B).
   3. Run full smoke suite, update QUICK_START.txt + this PLAN.
   4. git add -A && commit && push to origin/main.

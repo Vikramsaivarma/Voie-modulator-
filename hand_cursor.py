@@ -36,7 +36,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.3.0
+ VERSION   : 1.4.0
 ==============================================================================
 """
 
@@ -190,6 +190,8 @@ class HandCursorEngine:
         self._pinch_engaged = False  # hysteresis latch for the pinch
         self._mode_since = 0.0       # when the current stable mode began
         self._last_size_event = 0.0  # throttle for calibration size events
+        self._drag_beeped = False    # left-click beeped at drag start
+        self._right_drag_beeped = False  # right-click beeped at drag start
 
     # ------------------------------------------------------------------
     # Public control API
@@ -251,21 +253,25 @@ class HandCursorEngine:
         if right:
             if self._right_down:
                 self._right_down = False
+                self._right_drag_beeped = False
                 try:
                     pyautogui.mouseUp(button="right")
                 except Exception:
                     pass
                 if time.time() - self._right_pressed_at < 0.22:
                     self._send("log", "Right click.")
+                    self._send("beep", "right")
             return
         if self._button_down:
             self._button_down = False
+            self._drag_beeped = False
             try:
                 pyautogui.mouseUp()
             except Exception:
                 pass
             if time.time() - self._pressed_at < 0.22:
                 self._send("log", "Click.")
+                self._send("beep", "left")
 
     def _press_button(self, right=False):
         if right:
@@ -450,16 +456,26 @@ class HandCursorEngine:
             self._release_button(right=True)
             self._move_pointer(x, y)
             self._press_button()
-            label = "PINCH = CLICK" if time.time() - self._pressed_at < 0.22 \
-                else "PINCH = DRAG"
-            self._emit_state(label, (x, y))
+            held = time.time() - self._pressed_at
+            if held < 0.22:
+                label = "PINCH = CLICK"
+            else:
+                label = "PINCH = DRAG"
+                if not self._drag_beeped:
+                    self._drag_beeped = True
+                    self._send("beep", "drag")
         elif mode == "three":
             self._release_button()
             self._move_pointer(x, y)
             self._press_button(right=True)
-            label = "3 FINGERS = RIGHT CLICK" if \
-                time.time() - self._right_pressed_at < 0.22 \
-                else "3 FINGERS = RIGHT DRAG"
+            held = time.time() - self._right_pressed_at
+            if held < 0.22:
+                label = "3 FINGERS = RIGHT CLICK"
+            else:
+                label = "3 FINGERS = RIGHT DRAG"
+                if not self._right_drag_beeped:
+                    self._right_drag_beeped = True
+                    self._send("beep", "right_drag")
             self._emit_state(label, (x, y))
         elif mode == "peace":
             self._release_button()
@@ -484,6 +500,9 @@ class HandCursorEngine:
             self._move_pointer(x, y)
             self._press_button()
             label = "FIST = DRAG"
+            if not self._drag_beeped:
+                self._drag_beeped = True
+                self._send("beep", "drag")
             self._emit_state(label, (x, y))
         else:  # index / open hand  ->  move the pointer
             self._release_button()
