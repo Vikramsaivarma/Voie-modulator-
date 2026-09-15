@@ -1,0 +1,183 @@
+================================================================================
+  VOICE CONTROL - QUICK START GUIDE  (v3.0)
+================================================================================
+
+A Windows desktop app that lets you control your PC with your voice.
+Dark-themed GUI, green terminal log, Google speech-to-text, offline voice
+feedback (pyttsx3), a LIVE voice-level meter, a "what the app heard"
+display, Gemini-powered answers, and AUTO-BEST microphone selection.
+
+--------------------------------------------------------------------------------
+1) REQUIREMENTS
+--------------------------------------------------------------------------------
+  * Windows 10 or Windows 11 (64-bit recommended)
+  * Python 3.11 or newer from:  https://www.python.org/downloads/
+      IMPORTANT: during Python installation, tick the box
+      "Add Python to PATH" (it is off by default).
+  * A working microphone.
+
+--------------------------------------------------------------------------------
+2) INSTALL - RUN install.bat
+--------------------------------------------------------------------------------
+  1. Put all files in the SAME folder:
+       voice_app.py
+       requirements.txt
+       install.bat
+       QUICK_START.txt
+       voc_config.json   (created automatically - your settings live here)
+  2. Double-click install.bat (or right-click -> Run as administrator).
+  3. The script detects Python, upgrades pip, installs every dependency,
+     verifies all imports and shows "INSTALLATION COMPLETE".
+  4. Fix any [ERROR] printed on screen, then re-run install.bat.
+
+--------------------------------------------------------------------------------
+3) START THE APP
+--------------------------------------------------------------------------------
+  In Command Prompt (cmd) in the app folder:
+
+       python voice_app.py
+
+  ...or double-click voice_app.py. Use "py" instead of "python" if the
+  latter is not in PATH.
+
+  Allow microphone access when Windows asks
+  (Settings -> Privacy & security -> Microphone -> ON).
+
+--------------------------------------------------------------------------------
+4) PICK THE RIGHT MICROPHONE  (IMPORTANT!)
+--------------------------------------------------------------------------------
+By default Windows may pick a noisy or acoustic microchip. If the app
+   "does not listen" or hears only background noise:
+
+   1. Click START LISTENING once, then STOP.
+   2. Press AUTO-BEST - the app measures every microphone, logs the quiet
+      level of each one, and automatically selects the quietest usable
+      input. This is the quickest way to get a good microphone.
+   3. The LIVE green bar under the settings shows your voice level in real
+      time (turns amber near speech level, red while you talk). Speak now
+      and check it moves.
+   4. The "Heard:" line shows the last thing the app understood.
+   5. You can still pick any entry manually from the "Microphone:" dropdown
+      and use TEST MIC (shows the noise level and transcribes a sample).
+   6. The choice is saved in voc_config.json automatically.
+
+  Troubleshooting guides for more issues are in section 7.
+
+--------------------------------------------------------------------------------
+5) GEMINI AI ANSWERS
+--------------------------------------------------------------------------------
+  Any phrase that is not a known command is sent to Google Gemini and the
+  answer appears in the app log (a short version is also spoken aloud).
+
+  * The API key is already stored in voc_config.json ("gemini_api_key").
+  * You can also use the GEMINI_API_KEY environment variable instead.
+  * To change the AI model, edit "gemini_model" in voc_config.json
+    (current default: gemini-3.6-flash).
+  * If the key stops working, request a free one at:
+        https://aistudio.google.com/apikey
+    and paste it into voc_config.json.
+
+  Example usage:
+      "Ask what is the capital of France"
+      "What is 15 percent of 240"
+      "How do I clear my browser cache"
+      Or simply: "Tell me a fun fact"
+
+--------------------------------------------------------------------------------
+6) VOICE COMMANDS
+--------------------------------------------------------------------------------
+  APPS:
+    "Open Chrome"   "Open Firefox"   "Open Notepad"   "Open Calculator"
+    "Open File Explorer"   "Open Task Manager"   "Open Settings"
+
+  BROWSER:
+    "New Tab"   "Close Tab"   "Next Tab"   "Previous Tab"   "Refresh"
+    "Close Window"
+
+  WINDOW / SYSTEM:
+    "Minimize"   "Maximize"   "Lock Screen"
+    "Volume Up"  "Volume Down"  "Mute"
+    "Scroll Up"  "Scroll Down"
+
+  CLIPBOARD / EDITING:
+    "Copy"  "Paste"  "Cut"  "Undo"  "Select All"
+    "Press Enter"  "Press Delete"  "Press Backspace"  "Press Escape"
+
+  MEDIA:
+    "Play/Pause"   "Next Song"   "Previous Song"
+
+  TEXT / SEARCH:
+    "Type the quick brown fox"       -> types into the focused window
+    "Search cute cat videos"         -> Google search in default browser
+
+  AI:
+    "Ask what is the capital of France"
+
+  LIFECYCLE:
+    "Stop Listening"   -> pauses; say "Start Listening" to resume
+    "Start Listening"
+    "Help"             -> app reads the command list aloud
+    "Quit" / "Exit"    -> closes the app
+
+  TIPS:
+    * For "Type ..." / "Search ...", click into the target field FIRST,
+      then say the command.
+    * Speak a little slower than normal, especially right after a beep.
+
+--------------------------------------------------------------------------------
+7) TROUBLESHOOTING
+--------------------------------------------------------------------------------
+  * App does not listen / "Could not recognize that speech" all the time
+      -> See section 4. Switch microphones in the app dropdown and TEST.
+      -> High background noise raises the threshold. Move to a quieter
+         spot, or pick the quietest mic from the list.
+
+  * "No speech detected" repeatedly
+      -> You are speaking too quietly, or the wrong mic is selected.
+      -> Use AUTO-BEST, then watch the live GREEN level bar while you
+         talk - it should jump up every time you speak.
+
+  * "Missing Dependencies" dialog on start
+      -> Run install.bat (or:  pip install -r requirements.txt).
+
+  * 'python' is not recognized in cmd
+      -> Use "py voice_app.py", or reinstall Python with "Add to PATH".
+
+  * PyAudio fails to install
+      -> Install the matching wheel for Python 3.11 from:
+             https://www.lfd.uci.edu/~gohlke/pythonlibs/#pyaudio
+         e.g.  PyAudio-0.2.14-cp311-cp311-win_amd64.whl
+         then:  pip install <downloaded file>
+
+  * "Network error" in the log
+      -> Google speech recognition needs internet. Check connection and
+         just keep talking - the app retries automatically.
+
+  * Gemini answers show an error
+      -> Check voc_config.json has a valid "gemini_api_key".
+      -> Check "gemini_model" matches one currently offered by Google.
+      -> Check internet access. Errors are shown in the log.
+
+  * Types / searches in the wrong window
+      -> Focus the right window BEFORE saying "Type ..." / "Search ...".
+
+  * "Open Chrome" does nothing
+      -> Chrome is installed somewhere unusual. Edit APP_PATHS at the top
+         of voice_app.py to point at your install location.
+
+  * Settings changes are lost after closing
+      -> voc_config.json is saved automatically next to the app. Make
+         sure the app folder is writable and not read-only.
+
+--------------------------------------------------------------------------------
+8) FILES
+--------------------------------------------------------------------------------
+  voice_app.py        The complete application (Python 3.11+, tkinter)
+  requirements.txt    All Python dependencies (pinned working versions)
+  install.bat         One-click installer / verifier
+  QUICK_START.txt     You are reading it
+  voc_config.json     Local settings + your Gemini API key (do not share)
+  .gitignore          Keeps voc_config.json out of git
+
+  Enjoy controlling your PC by voice!
+================================================================================

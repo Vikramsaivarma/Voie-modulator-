@@ -1,0 +1,12 @@
+# Python dependencies for the Windows Voice Control desktop app.
+# Install all at once with:
+#     pip install -r requirements.txt
+#
+# Pinned versions are known to work together on Python 3.11 / Windows.
+
+SpeechRecognition==3.10.4     # Speech-to-text via the Google Web Speech API
+pyttsx3==2.90                 # Offline text-to-speech (uses Windows SAPI5)
+comtypes==1.2.1               # Underlying COM support for pyttsx3 on Windows
+PyAutoGUI==0.9.54            # Keyboard / mouse automation
+PyAudio==0.2.14              # Microphone capture (has wheels for Python 3.11)
+requests>=2.31.0              # HTTP calls to the Gemini API
