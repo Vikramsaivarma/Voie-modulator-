@@ -1,0 +1,146 @@
+===============================================================================
+ CONTINUATION HANDOFF - Voice Control "super app"  (created: session Friday)
+===============================================================================
+Read this FIRST when restarting work on the project. It mirrors the context
+the coding assistant had when this session ended.
+
+WHAT "KEEP IN A TEXT" MEANS FOR YOU
+- The app itself is fully saved/committed/pushed (git clean = no pending work).
+- Tomorrow, open this file, hand it to the assistant as context, and say
+  "continue the roadmap" (next item = TWO-HAND SUPPORT, see bottom).
+
+===============================================================================
+1) OBJECTIVE
+===============================================================================
+Ship the remaining Phase D roadmap in small, tested batches for the Windows
+"super app" (voice_app.py + hand_cursor.py) in C:\Users\Jo\Desktop\voicemodule.
+Latest shipped batch: v5.4 (touchpad mode). Hard rule: the Gemini API key
+stays LOCAL ONLY in the gitignored voc_config.json - it must never appear in
+git history, diff output, or any pushed file. voc_log.txt is also gitignored.
+
+===============================================================================
+2) QUICK FACTS
+===============================================================================
+- Python: C:\Users\Jo\anaconda3\python.exe  -> always compile/test with this.
+  Kill leftover python/pythonw processes before camera tests (they lock the
+  webcam). Zero strays must remain after a test run.
+- Repo: C:\Users\Jo\Desktop\voicemodule, branch main, remote:
+  https://github.com/Vikramsaivarma/Voie-modulator-.git
+- Versions CURRENTLY on disk/pushed: voice_app.py 5.4.0, hand_cursor.py 1.7.0.
+- Pushed history:
+  9491bf9 v5.0 full-scale (beeps, TTS profiles, Gemini memory, cursor vision,
+          log persistence, autostart)
+  8f5e3c5 v5.1 chained "then" commands, wake word aliases, timer toasts,
+          clipboard card, calibration live-size readout
+  b0851c6 v5.2 gesture trainer window, system tray + minimize-to-tray +
+          global hotkey (pystray 0.19.5, keyboard 0.13.5)
+  e2faca0 v5.3 draw-macro gestures ($1-style shape recognizer)
+  330ad97 v5.4 touchpad / relative-mouse mode
+- Deps (requirements.txt): speech_recognition, pyttsx3, pyautogui, pyaudio,
+  opencv, mediapipe, pillow, requests, pystray, keyboard.
+
+===============================================================================
+3) CURRENT ARCHITECTURE (v5.4)
+===============================================================================
+- voice_app.py ~3500 lines: tkinter GUI + controller. Threads: stt, tts,
+  timers. GUI thread: clipboard watcher, waveform meter, hand preview, log,
+  calibration sampler, tray. Config voc_config.json (gitignored).
+  Cards: VOICE, WAVEFORM, HAND CURSOR (SENS/SCROLL sliders, CALIBRATE REACH
+  + live size readout, TRAIN GESTURES, DRAW MACROS, TOUCHPAD, Beep), HEARD
+  banner, CLIPBOARD card (click-to-paste), ACTIVITY LOG, status bar.
+  Tray (pystray) + hotkey ctrl+alt+v + X-button hides to tray; real shutdown
+  is on_close() guarded by self._closing.
+  Mode logic (5.4): driver modes are mutually exclusive -
+    macros (DRAW MACROS config macro_mode/macro_actions)
+    touchpad (TOUCHPAD config touchpad_mode/touchpad_gain)
+    cursor (default). Whichever is enabled last wins (both sides enforce it).
+  Chaining: static VoiceControlApp._parse_chain(lowered) splits on
+  \s+(?:and\s+)?then\s+; parts need >=2 words or a single-word verb in
+  (start, stop, help, refresh, minimize, maximize, mute, enter, undo, paste,
+  copy); else None (Gemini fallback). Worker executes parts, 0.6s between.
+  Draw macros: engine emits ("macro", name); GUI _on_macro maps name ->
+  action (MACRO_DEFAULT_ACTIONS, overridable via macro_actions config) and
+  runs it via handle_command on a daemon thread.
+
+- hand_cursor.py: MediaPipe engine (daemon). Landmark constants defined.
+  v1.7.0 driver modes:
+    "cursor"  - absolute mapping _to_screen + reach gate (arm/disarm,
+                hysteresis), STABLE_FRAMES=5 debounce, pinch hysteresis,
+                ambiguous poses fall back to MOVE.
+    "macros"  - _handle_macro collects fingertip path; dwell (~1s still)
+                or hand-lost finalizes; _recognize_macro is a $1-style
+                matcher (resample 32 -> normalize to 0..1 -> template
+                distance; MACRO_MATCH_MAX=0.22); 9 templates (circle, v,
+                check, l, s, z, w, line, slash). MACRO_MIN_POINTS=12 gate
+                lives in _finalize_macro (short strokes -> macro None).
+    "touchpad"- _handle_landmarks; _touchpad_next returns relative
+                cursor from wrist+middle-MCP center deltas, EMA smoothing
+                (TOUCHPAD_SMOOTH 0.35), noise floor 0.0015, clamp 0.04,
+                gain = sensitivity*TOUCHPAD_GAIN(2.5). Reach gate skipped.
+  Events: log/status/hand_state/hand_preview/hand_size/started/stopped/
+  error/train/macro/beep/tts_voices/quit. Engine never touches the GUI.
+
+===============================================================================
+4) WORK STATE
+===============================================================================
+DONE:
+- v5.0..v5.4 all implemented, tested (test_v54.py), committed, pushed.
+- ALL local tests currently pass: "C:\Users\Jo\anaconda3\python.exe"
+  test_v54.py  -> "=== ALL v5.4 TESTS PASSED ===" and 0 stray python procs.
+- git working tree CLEAN, main == origin/main (nothing pending).
+- install.bat verifies core imports and pystray/keyboard (warn-only).
+- PLAN.txt + QUICK_START.txt updated to v5.4.
+
+OPEN / NEXT:
+- TODO list in PLAN.txt "4) NEXT SHIPMENT":
+  1. Two-hand support (primary pointer hand + modifier hand) - Phase D.
+  2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
+  3. After each batch: py_compile voice_app.py hand_cursor.py, run
+     test_v54.py (create test_v55.py, delete the old one), update
+     QUICK_START.txt + PLAN.txt, git add -A && commit && push to origin/main.
+- Conventions for a new batch/version:
+  * Bump voice_app.py docstring VERSION (e.g. 5.5.0) + a FEATURES bullet;
+    bump hand_cursor.py VERSION + docstring section when engine changes.
+  * Add DEFAULT_CONFIG keys for any new toggle; save via module-level
+    save_config(self.config) (NOT self._save_config - it does not exist).
+  * New GUI buttons go in the hand_actions second row; voice commands added
+    BEFORE the Gemini-fallback return; update HELP_TEXT.
+  * New smoke suite: copy test_v54.py, add the new feature's checks, keep
+    ALL regression checks. Self-heal at top: remember orig macro/touchpad
+    config values, force False, save; restore at end. Use va.save_config.
+  * The tray/hotkey/engine-classification tests hit real subsystems - the
+    suite ends with app.on_close() for a real clean shutdown.
+
+===============================================================================
+5) HOW TO TEST (every batch)
+===============================================================================
+1. Kill strays:  Get-Process python*,pythonw -EA SilentlyContinue | Stop-Process -Force
+2. & "C:\Users\Jo\anaconda3\python.exe" -m py_compile voice_app.py hand_cursor.py
+3. & "C:\Users\Jo\anaconda3\python.exe" test_v54.py   (or current test file)
+4. Confirm 0 stray python processes after.
+5. git add -A; git commit -m "v5.x: <short feature>"; git push origin main.
+
+===============================================================================
+6) TWO-HAND SUPPORT SKETCH (tomorrow's batch - not yet started)
+===============================================================================
+Goal from PLAN: "Two-hand support (left = pointer, right = modifiers)."
+Work-in-progress thoughts to guide you (NOT implemented):
+- Engine currently uses max_num_hands=1 and results.multi_hand_landmarks[0].
+  For two hands: set max_num_hands=2, read results.multi_handedness to tell
+  Left/Right apart (each entry has a label 'Left'/'Right' and classification
+  score). mediapipe hands face the camera, so handedness mirrors real-world
+  laterality; pick the pointer hand by whichever landing you want (e.g. the
+  one on screen-left) and use handedness to assign the modifier role.
+- Modifier semantics are arbitrary until YOU decide; a minimal, safe first
+  version: the modifier hand adds a BOOLEAN modifier (e.g. "both hands need
+  to be visible, pointer hand does everything, modifier hand simply must
+  be open for the pointer to CLICK" OR "modifier hand open toggles on the
+  fly to a secondary action set"). Pick ONE, implement, and write synthetic
+  landmarks for both hands (21 landmarks each) in the test.
+- Interference guard: when both hands are present, only the pointer hand
+  drives the mouse; buttons stay gated by STABLE_FRAMES so a wobbling
+  second hand can never click.
+
+===============================================================================
+(END OF HANDOFF - you are up to date with the session.)
+===============================================================================
