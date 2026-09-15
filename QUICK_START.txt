@@ -1,13 +1,14 @@
 ================================================================================
-  VOICE CONTROL - QUICK START GUIDE  (v3.0)
-================================================================================
+VOICE CONTROL - QUICK START GUIDE  (v4.0)
+===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
-Dark-themed GUI, green terminal log, Google speech-to-text, offline voice
-feedback (pyttsx3), a LIVE voice-level meter, a "what the app heard"
-display, Gemini-powered answers, AUTO-BEST microphone selection, and a
-HAND-CURSOR air mouse: use your webcam to move the pointer and "touch"
-the screen with finger gestures.
+Modern dark-themed GUI, live voice-activity WAVEFORM, Google speech-to-text,
+offline voice feedback (pyttsx3), a "what the app heard" display,
+Gemini-powered answers + SCREEN VISION, TIMERS/REMINDERS, CLIPBOARD
+HISTORY, AUTO-BEST microphone selection, and a HAND-CURSOR air mouse:
+use your webcam to move the pointer and "touch" the screen with finger
+gestures (with a live 5-finger state panel on the preview).
 
 --------------------------------------------------------------------------------
 1) REQUIREMENTS
@@ -60,8 +61,9 @@ By default Windows may pick a noisy or acoustic microchip. If the app
    2. Press AUTO-BEST - the app measures every microphone, logs the quiet
       level of each one, and automatically selects the quietest usable
       input. This is the quickest way to get a good microphone.
-   3. The LIVE green bar under the settings shows your voice level in real
-      time (turns amber near speech level, red while you talk). Speak now
+   3. The LIVE waveform bar under the settings shows your voice level in
+      real time (green when quiet, amber approaching speech level, RED and
+      taller while you talk). The header badge flips to SPEAKING. Speak now
       and check it moves.
    4. The "Heard:" line shows the last thing the app understood.
    5. You can still pick any entry manually from the "Microphone:" dropdown
@@ -90,6 +92,24 @@ By default Windows may pick a noisy or acoustic microchip. If the app
       "How do I clear my browser cache"
       Or simply: "Tell me a fun fact"
 
+  SCREEN VISION (ask Gemini to look at your screen):
+      "Analyze screen" / "What is on my screen"
+      "Describe what is on my screen"
+      "Read my screen and summarize it"
+   -> The app captures a screenshot, sends it to Gemini, shows the answer
+      in the log and reads a short version aloud.
+
+  TIMERS & REMINDERS:
+      "Set a timer for 5 minutes"
+      "Set a timer for 1 hour 30 minutes"
+      "Remind me in 10 minutes to stretch"
+   -> When the time is up the app logs + speaks the reminder.
+
+  CLIPBOARD HISTORY:
+      The app silently remembers the last 8 things you copied.
+      "What did I copy"    "Show my clipboard"
+   -> Prints the remembered entries in the log.
+
 --------------------------------------------------------------------------------
 6) AIR CURSOR / HAND CONTROL (webcam "touch")
 -------------------------------------------------------------------------------
@@ -101,7 +121,12 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   Open hand (5 fingers)  Move the cursor too (wider range, easier to hold)
   Pinch (thumb+index)    Click / tap (hold it to drag)
   Peace sign             Scroll (move your hand up or down)
+  3 fingers              RIGHT click / right-drag (context menus)
   Fist                   Hold the LEFT mouse button (drag/select)
+
+  * The live preview overlay shows a 5-finger panel (T I M R P - thumb,
+    index, middle, ring, pinky) that turns green on each finger that is
+    extended, so you always see what the app is reading.
 
   * Starts automatically when the app opens. Use START / STOP to switch.
   * Say "start hand cursor" or "stop hand cursor" to do it by voice.
@@ -147,6 +172,10 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
 
   AI:
     "Ask what is the capital of France"
+    "Analyze screen" / "What is on my screen"   (Gemini screen vision)
+    "Set a timer for 10 minutes"
+    "Remind me in 5 minutes to take a break"
+    "What did I copy"   /   "Show my clipboard"
 
   LIFECYCLE:
     "Stop Listening"   -> pauses; say "Start Listening" to resume

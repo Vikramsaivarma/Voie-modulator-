@@ -5,12 +5,20 @@
 
  FEATURES
  --------
- * Dark-themed GUI (600x560 px) with terminal-style green text.
+ * Modern dark-themed GUI with a LIVE voice-activity WAVEFORM that shows
+   every time you speak (plus colour-coded LISTENING / SPEAKING states).
  * Microphone DEVICE SELECTOR (fixes "not listening" on noisy or wrong mics).
  * Recognition LANGUAGE selector.
  * Start / Stop listening buttons + a "Test Microphone" button.
  * HAND-CURSOR air mouse: webcam hand tracking that moves the cursor
-   (index finger), clicks/drags (pinch / fist) and scrolls (peace sign).
+   (index finger), clicks/drags (pinch / fist / three fingers = right click)
+   and scrolls (peace sign). A 5-finger panel shows each finger live.
+ * SCREEN VISION: "analyze screen / what is on my screen" sends a
+   screenshot to Gemini and reads the answer aloud (vision model).
+ * TIMER / REMINDER commands: "set a timer for 5 minutes",
+   "set a reminder at 3 o'clock to drink water".
+ * CLIPBOARD HISTORY: the app tracks the last few things you copied and
+   can replay them ("what did I copy", "show my clipboard").
  * Real-time scrolling command log with live status.
  * Stabilised voice-activity detection (VAD) that does not drift away
    from normal speech levels in a noisy room.
@@ -54,12 +62,14 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
- VERSION   : 3.2.0
-================================================================================
+VERSION   : 4.0.0
+===============================================================================
 """
 
 import array
+import base64
 import ctypes
+import io
 import json
 import os
 import queue
@@ -69,6 +79,7 @@ import threading
 import time
 import tkinter as tk
 import webbrowser
+from collections import deque
 from tkinter import scrolledtext, messagebox
 from urllib.parse import quote_plus
 
@@ -96,9 +107,11 @@ except ImportError:
 
 try:
     from PIL import ImageTk
+    from PIL import ImageGrab
     PIL_OK = True
 except ImportError:
     ImageTk = None
+    ImageGrab = None
     PIL_OK = False
 
 
@@ -107,6 +120,9 @@ except ImportError:
 # ----------------------------------------------------------------------
 BG_COLOR          = "#0d1117"
 FG_COLOR          = "#33ff33"
+ACCENT            = "#58a6ff"
+MUTED             = "#8b949e"
+SUBTLE_BG         = "#161b22"
 LOG_BG_COLOR      = "#010409"
 LOG_FG_COLOR      = "#00ff66"
 BTN_BG_COLOR      = "#1f6f43"
@@ -114,6 +130,10 @@ BTN_STOP_BG_COLOR = "#6e2020"
 BTN_TEST_BG_COLOR = "#1f5380"
 BTN_FG_COLOR      = "#ffffff"
 HLIGHT_COLOR      = "#238636"
+RED               = "#f85149"
+AMBER             = "#d29922"
+GREEN             = "#238636"
+GREY              = "#3a3f45"
 
 FONT_NAME   = "Consolas"
 LOG_FONT    = (FONT_NAME, 10)
@@ -317,12 +337,16 @@ class VoiceControlApp:
         "minimize or maximize windows, lock the screen, change volume, copy "
         "and paste, type text after the word type, and search after the "
         "word search. I answer questions after the word ask, and questions "
-        "open a Chrome search as well. Use AUTO-BEST in the app to pick the "
-        "best microphone. Say stop listening to pause, start listening to "
-        "resume, and help for this message. I also control the mouse cursor "
-        "with your hand: raise your index finger or open hand to move, pinch to "
-        "click, make a peace sign to scroll, and make a fist to drag. Say "
-        "start hand cursor or stop hand cursor to switch it on or off."
+        "open a Chrome search as well. I can look at your screen and "
+        "describe it: say screen analysis. I can set timers: say set a "
+        "timer for 5 minutes, or set a reminder at 3 o'clock. I remember "
+        "your clipboard: say what did I copy. Use AUTO-BEST in the app to "
+        "pick the best microphone. Say stop listening to pause, start "
+        "listening to resume, and help for this message. I also control "
+        "the mouse cursor with your hand: raise your index finger or open "
+        "hand to move, pinch to click, three fingers for a right click, "
+        "make a peace sign to scroll, and make a fist to drag. Say start "
+        "hand cursor or stop hand cursor to switch it on or off."
     )
 
     GREETINGS = {"hello", "hi", "hey", "good morning", "good afternoon",
@@ -343,6 +367,25 @@ class VoiceControlApp:
         self.config = load_config()
         self._ready = False  # blocks control callbacks until the GUI is built
         self._meter_threshold = 500  # live VAD threshold for the meter/red zone
+
+        # Live voice-activity history for the visualiser waveform.
+        self._rms_history = deque(maxlen=60)
+        self._waveform_handle = None
+        self._voice_state = "idle"   # idle | listening | speaking | paused
+
+        # Timer / reminder state (worker thread guarded list).
+        self._timers = []
+        self._timers_lock = threading.Lock()
+        self._timers_event = threading.Event()
+        self._timers_thread = threading.Thread(
+            target=self._timer_runner, name="timers", daemon=True)
+        self._timers_thread.start()
+
+        # Clipboard history state (populated by a GUI-thread poller).
+        self._clip_history = []
+        self._clip_lock = threading.Lock()
+        self._last_clip_value = None
+        self._clip_watch_started = False
 
         # Worker thread control.
         self._listening_event = threading.Event()
@@ -376,19 +419,38 @@ class VoiceControlApp:
     # GUI construction
     # ------------------------------------------------------------------
     def _build_gui(self):
-        """Lay out title, controls, log, buttons and status bar."""
-        # --- Title ------------------------------------------------------
-        tk.Label(
-            self.root, text="[ VOICE CONTROL ]", font=TITLE_FONT,
-            bg=BG_COLOR, fg=FG_COLOR,
-        ).pack(pady=(10, 4))
+        """Lay out the redesigned card-based UI with a live voice waveform."""
+        self.root.geometry("700x940")
+        self.root.title("Voice Control - Speech Application")
+        self.root.minsize(620, 640)
 
-        # --- Settings row (microphone + language pickers) ---------------
-        settings = tk.Frame(self.root, bg=BG_COLOR)
-        settings.pack(fill=tk.X, padx=12, pady=4)
+        # --- Header -----------------------------------------------------
+        header = tk.Frame(self.root, bg=SUBTLE_BG)
+        header.pack(fill=tk.X)
+        tk.Label(header, text="\u25C9  VOICE CONTROL", font=TITLE_FONT,
+                 bg=SUBTLE_BG, fg=FG_COLOR).pack(side=tk.LEFT,
+                                                 padx=(16, 6), pady=12)
+        self.status_badge = tk.Label(header, text="IDLE", font=BTN_FONT,
+                                     bg=GREY, fg="#ffffff", padx=10, pady=2)
+        self.status_badge.pack(side=tk.RIGHT, padx=16)
 
-        tk.Label(settings, text="Microphone:", font=SMALL_FONT,
-                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.LEFT)
+        body = tk.Frame(self.root, bg=BG_COLOR)
+        body.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 0))
+
+        # --- VOICE CARD -------------------------------------------------
+        voice = tk.Frame(body, bg=SUBTLE_BG, bd=1,
+                         highlightbackground="#30363d",
+                         highlightthickness=1)
+        voice.pack(fill=tk.X, pady=(0, 8))
+
+        tk.Label(voice, text="MICROPHONE & VOICE", font=(FONT_NAME, 9, "bold"),
+                 bg=SUBTLE_BG, fg=ACCENT).pack(anchor="w", padx=12, pady=(8, 2))
+
+        settings = tk.Frame(voice, bg=SUBTLE_BG)
+        settings.pack(fill=tk.X, padx=12, pady=(2, 6))
+
+        tk.Label(settings, text="Mic:", font=SMALL_FONT,
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT)
         self.device_var = tk.StringVar(value="")
         device_choices = self._list_input_devices()
         self.device_menu = tk.OptionMenu(
@@ -403,13 +465,13 @@ class VoiceControlApp:
             settings, text="AUTO-BEST", font=(FONT_NAME, 8, "bold"),
             bg=BTN_TEST_BG_COLOR, fg=BTN_FG_COLOR,
             activebackground="#2c6496", activeforeground=BTN_FG_COLOR,
-            relief=tk.FLAT, cursor="hand2", padx=6, pady=2,
+            relief=tk.FLAT, cursor="hand2", padx=8, pady=2,
             command=self._auto_select,
         )
         self.auto_btn.pack(side=tk.LEFT, padx=(0, 14))
 
-        tk.Label(settings, text="Language:", font=SMALL_FONT,
-                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.LEFT)
+        tk.Label(settings, text="Lang:", font=SMALL_FONT,
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT)
         self.lang_var = tk.StringVar(value=self.config["language"])
         self.lang_menu = tk.OptionMenu(
             settings, self.lang_var, *LANGUAGES,
@@ -419,40 +481,80 @@ class VoiceControlApp:
                               highlightthickness=1, highlightbackground="#30363d")
         self.lang_menu.pack(side=tk.LEFT, padx=(4, 0))
 
-        # Make the device picker show the configured choice.
         self._apply_device_selection(device_choices)
+        settings.columnconfigure(0, weight=1)
 
-        # --- Live voice-level meter --------------------------------------
-        meter_row = tk.Frame(self.root, bg=BG_COLOR)
-        meter_row.pack(fill=tk.X, padx=12, pady=(4, 0))
+        # --- Live voice-activity meter ----------------------------------
+        meter_frame = tk.Frame(voice, bg=SUBTLE_BG)
+        meter_frame.pack(fill=tk.X, padx=12, pady=(0, 2))
 
         self.level_var = tk.StringVar(value="LEVEL: --  (not listening)")
-        tk.Label(meter_row, textvariable=self.level_var, font=(FONT_NAME, 8),
-                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.LEFT)
+        tk.Label(meter_frame, textvariable=self.level_var, font=(FONT_NAME, 8),
+                 bg=SUBTLE_BG, fg=FG_COLOR).pack(side=tk.LEFT)
 
         self.threshold_var = tk.StringVar(value="speech threshold: --")
-        tk.Label(meter_row, textvariable=self.threshold_var, font=(FONT_NAME, 8),
-                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.RIGHT)
+        tk.Label(meter_frame, textvariable=self.threshold_var,
+                 font=(FONT_NAME, 8), bg=SUBTLE_BG, fg=AMBER).pack(side=tk.RIGHT)
 
+        # The waveform canvas doubles as the speech-level visualiser.
         self.meter_canvas = tk.Canvas(
-            self.root, height=16, bg=LOG_BG_COLOR,
-            highlightthickness=1, highlightbackground="#30363d",
+            voice, height=64, bg=LOG_BG_COLOR, highlightthickness=0,
         )
-        self.meter_canvas.pack(fill=tk.X, padx=12, pady=(2, 2))
-        self._meter_fill = None
-        self._meter_color = "#238636"
+        self.meter_canvas.pack(fill=tk.X, padx=12, pady=(2, 4))
 
-        # --- Hand cursor (air mouse / touch) section --------------------
-        hand_row = tk.Frame(self.root, bg=BG_COLOR)
-        hand_row.pack(fill=tk.X, padx=12, pady=(6, 0))
+        # --- Controls row ----------------------------------------------
+        btn_frame = tk.Frame(voice, bg=SUBTLE_BG)
+        btn_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
 
-        tk.Label(hand_row, text="HAND CURSOR:", font=(FONT_NAME, 9, "bold"),
-                 bg=BG_COLOR, fg="#58a6ff").pack(side=tk.LEFT)
+        self.start_btn = tk.Button(
+            btn_frame, text="\u25B6  START LISTENING", font=BTN_FONT,
+            bg=BTN_BG_COLOR, fg=BTN_FG_COLOR,
+            activebackground=HLIGHT_COLOR, activeforeground=BTN_FG_COLOR,
+            relief=tk.FLAT, cursor="hand2", padx=14, pady=5,
+            command=self.start_listening,
+        )
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.stop_btn = tk.Button(
+            btn_frame, text="\u25A0  STOP", font=BTN_FONT,
+            bg=BTN_STOP_BG_COLOR, fg=BTN_FG_COLOR,
+            activebackground="#8b2c2c", activeforeground=BTN_FG_COLOR,
+            relief=tk.FLAT, cursor="hand2", padx=14, pady=5,
+            command=self.stop_listening, state="disabled",
+        )
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.test_btn = tk.Button(
+            btn_frame, text="TEST MIC", font=BTN_FONT,
+            bg=BTN_TEST_BG_COLOR, fg=BTN_FG_COLOR,
+            activebackground="#2c6496", activeforeground=BTN_FG_COLOR,
+            relief=tk.FLAT, cursor="hand2", padx=14, pady=5,
+            command=self.test_mic,
+        )
+        self.test_btn.pack(side=tk.LEFT)
+
+        # --- Hand cursor card ------------------------------------------
+        hand_card = tk.Frame(body, bg=SUBTLE_BG, bd=1,
+                             highlightbackground="#30363d",
+                             highlightthickness=1)
+        hand_card.pack(fill=tk.X, pady=(0, 8))
+
+        hand_head = tk.Frame(hand_card, bg=SUBTLE_BG)
+        hand_head.pack(fill=tk.X, padx=12, pady=(8, 2))
+        tk.Label(hand_head, text="HAND CURSOR (AIR MOUSE)",
+                 font=(FONT_NAME, 9, "bold"), bg=SUBTLE_BG,
+                 fg=ACCENT).pack(side=tk.LEFT)
 
         self.hand_state_var = tk.StringVar(value="hand: off")
-        tk.Label(hand_row, textvariable=self.hand_state_var,
-                 font=(FONT_NAME, 8), bg=BG_COLOR, fg=LOG_FG_COLOR,
-                 anchor="w").pack(side=tk.LEFT, padx=(6, 0))
+        self.hand_led = tk.Label(hand_head, text="   ", font=(FONT_NAME, 8),
+                                 bg=GREY)
+        self.hand_led.pack(side=tk.LEFT, padx=(10, 4))
+        tk.Label(hand_head, textvariable=self.hand_state_var,
+                 font=(FONT_NAME, 8), bg=SUBTLE_BG, fg=LOG_FG_COLOR,
+                 anchor="w").pack(side=tk.LEFT)
+
+        hand_row = tk.Frame(hand_card, bg=SUBTLE_BG)
+        hand_row.pack(fill=tk.X, padx=12, pady=(0, 6))
 
         self.hand_stop_btn = tk.Button(
             hand_row, text="STOP", font=(FONT_NAME, 8, "bold"),
@@ -461,7 +563,7 @@ class VoiceControlApp:
             relief=tk.FLAT, cursor="hand2", padx=10, pady=2,
             command=self.stop_hand_cursor, state="disabled",
         )
-        self.hand_stop_btn.pack(side=tk.RIGHT)
+        self.hand_stop_btn.pack(side=tk.LEFT)
 
         self.hand_btn = tk.Button(
             hand_row, text="START", font=(FONT_NAME, 8, "bold"),
@@ -470,10 +572,10 @@ class VoiceControlApp:
             relief=tk.FLAT, cursor="hand2", padx=10, pady=2,
             command=self._hand_start_btn,
         )
-        self.hand_btn.pack(side=tk.RIGHT, padx=(0, 4))
+        self.hand_btn.pack(side=tk.LEFT, padx=(0, 4))
 
         tk.Label(hand_row, text="Cam:", font=(FONT_NAME, 8),
-                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.RIGHT, padx=(10, 2))
+                 bg=SUBTLE_BG, fg=MUTED).pack(side=tk.LEFT, padx=(10, 2))
         self.camera_var = tk.StringVar(
             value=str(self.config.get("camera_index", 0)))
         cam_menu = tk.OptionMenu(
@@ -482,93 +584,76 @@ class VoiceControlApp:
         )
         cam_menu.config(bg=BG_COLOR, fg=FG_COLOR, highlightthickness=1,
                         highlightbackground="#30363d")
-        cam_menu.pack(side=tk.RIGHT)
+        cam_menu.pack(side=tk.LEFT)
 
         self.preview_var = tk.BooleanVar(
             value=bool(self.config.get("show_preview", True)))
         tk.Checkbutton(
             hand_row, text="Preview", variable=self.preview_var,
-            font=(FONT_NAME, 8), bg=BG_COLOR, fg="#8b949e",
-            selectcolor=BG_COLOR, activebackground=BG_COLOR,
-            activeforeground="#8b949e", highlightthickness=0, bd=0,
+            font=(FONT_NAME, 8), bg=SUBTLE_BG, fg=MUTED,
+            selectcolor=BG_COLOR, activebackground=SUBTLE_BG,
+            activeforeground=MUTED, highlightthickness=0, bd=0,
             command=self._on_preview_toggle,
-        ).pack(side=tk.RIGHT, padx=(0, 8))
+        ).pack(side=tk.LEFT, padx=(10, 0))
 
         self.preview_canvas = tk.Label(
-            self.root, bg=LOG_BG_COLOR, text="(preview turned off)",
-            font=(FONT_NAME, 8), fg="#8b949e",
+            hand_card, bg=LOG_BG_COLOR, text="(preview turned off)",
+            font=(FONT_NAME, 8), fg=MUTED,
             highlightthickness=1, highlightbackground="#30363d",
         )
-        self.preview_canvas.pack(fill=tk.X, padx=12, pady=(4, 0),
-                                 ipadx=6, ipady=6)
+        self.preview_canvas.pack(fill=tk.X, padx=12, pady=(0, 8), ipadx=6,
+                                 ipady=6)
 
-        # --- Live "what the app heard" display ----------------------------
+        # --- Live "what I heard" banner --------------------------------
         self.heard_var = tk.StringVar(value="Heard: (nothing yet)")
-        tk.Label(self.root, textvariable=self.heard_var,
-                 font=(FONT_NAME, 10, "bold"), bg=BG_COLOR, fg="#e6edf3",
-                 anchor="w", justify=tk.LEFT, wraplength=560,
-                 ).pack(fill=tk.X, padx=12, pady=(2, 0))
+        heard_label = tk.Label(
+            body, textvariable=self.heard_var, font=(FONT_NAME, 10, "bold"),
+            bg=SUBTLE_BG, fg="#e6edf3", anchor="w", justify=tk.LEFT,
+            wraplength=640,
+        )
+        heard_label.pack(fill=tk.X, pady=(0, 8), ipady=4)
+        self.heard_label = heard_label
 
-        # --- Scrolling command log (read-only) --------------------------
+        # --- Command / activity log -------------------------------------
+        log_card = tk.Frame(body, bg=SUBTLE_BG, bd=1,
+                            highlightbackground="#30363d",
+                            highlightthickness=1)
+        log_card.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(log_card, text="ACTIVITY LOG",
+                 font=(FONT_NAME, 9, "bold"), bg=SUBTLE_BG,
+                 fg=ACCENT).pack(anchor="w", padx=12, pady=(8, 2))
+
         self.log_text = scrolledtext.ScrolledText(
-            self.root,
-            bg=LOG_BG_COLOR, fg=LOG_FG_COLOR, font=LOG_FONT,
+            log_card, bg=LOG_BG_COLOR, fg=LOG_FG_COLOR, font=LOG_FONT,
             insertbackground=LOG_FG_COLOR, relief=tk.FLAT,
-            highlightthickness=1, highlightbackground="#30363d",
-            state="disabled", wrap=tk.WORD,
+            highlightthickness=0, state="disabled", wrap=tk.WORD,
         )
-        self.log_text.pack(fill=tk.BOTH, expand=True, padx=12, pady=4)
-
-        # --- Button row --------------------------------------------------
-        btn_frame = tk.Frame(self.root, bg=BG_COLOR)
-        btn_frame.pack(pady=8)
-
-        self.start_btn = tk.Button(
-            btn_frame, text="START LISTENING", font=BTN_FONT,
-            bg=BTN_BG_COLOR, fg=BTN_FG_COLOR,
-            activebackground=HLIGHT_COLOR, activeforeground=BTN_FG_COLOR,
-            relief=tk.FLAT, cursor="hand2", padx=16, pady=5,
-            command=self.start_listening,
-        )
-        self.start_btn.grid(row=0, column=0, padx=6)
-
-        self.stop_btn = tk.Button(
-            btn_frame, text="STOP LISTENING", font=BTN_FONT,
-            bg=BTN_STOP_BG_COLOR, fg=BTN_FG_COLOR,
-            activebackground="#8b2c2c", activeforeground=BTN_FG_COLOR,
-            relief=tk.FLAT, cursor="hand2", padx=16, pady=5,
-            command=self.stop_listening, state="disabled",
-        )
-        self.stop_btn.grid(row=0, column=1, padx=6)
-
-        self.test_btn = tk.Button(
-            btn_frame, text="TEST MIC", font=BTN_FONT,
-            bg=BTN_TEST_BG_COLOR, fg=BTN_FG_COLOR,
-            activebackground="#2c6496", activeforeground=BTN_FG_COLOR,
-            relief=tk.FLAT, cursor="hand2", padx=16, pady=5,
-            command=self.test_mic,
-        )
-        self.test_btn.grid(row=0, column=2, padx=6)
+        self.log_text.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 8))
 
         # --- Status bar + hint -------------------------------------------
         self.status_var = tk.StringVar(value="Idle. Press START LISTENING.")
         tk.Label(self.root, textvariable=self.status_var, font=SMALL_FONT,
-                 bg=BG_COLOR, fg="#8b949e").pack(side=tk.BOTTOM, pady=(0, 2))
+                 bg=BG_COLOR, fg=MUTED).pack(side=tk.BOTTOM, pady=(0, 2))
 
         tk.Label(
             self.root,
             text="Say: Open <app> | Type <text> | Search <query> | "
-                 "Ask <question> | New/Close/Next Tab | Refresh | "
-                 "Minimize | Lock Screen | Stop Listening | Help | "
-                 "Start/Stop Hand Cursor",
-            font=(FONT_NAME, 8), bg=BG_COLOR, fg="#58a6ff",
-            wraplength=570, justify=tk.LEFT,
+                 "Ask <question> | Analyze screen | Set timer | "
+                 "What did I copy | New/Close/Next Tab | Minimize | "
+                 "Lock Screen | Stop Listening | Help | Start/Stop Hand Cursor",
+            font=(FONT_NAME, 8), bg=BG_COLOR, fg=ACCENT,
+            wraplength=640, justify=tk.LEFT,
         ).pack(side=tk.BOTTOM, fill=tk.X, padx=12, pady=4)
 
         self._ready = True
 
-        # Start the queue poller (runs forever on the GUI thread).
+        # Draw an idle waveform placeholder, then start the queue poller and
+        # the clipboard history watcher (all on the GUI thread).
+        self._redraw_waveform()
         self.root.after(30, self._poll_queue)
+        self._clip_watch_started = False
+        self.root.after(800, self._watch_clipboard)
 
     # ------------------------------------------------------------------
     # Device / language helpers (GUI thread)
@@ -707,32 +792,77 @@ class VoiceControlApp:
     # Live meter + heard display (GUI thread)
     # ------------------------------------------------------------------
     def _on_level(self, rms_value):
-        """Update the live voice-level meter from a queue message."""
+        """Update the live voice-level metre + waveform from a queue message."""
         self.level_var.set(
             f"LEVEL: {rms_value}  ({describe_noise(rms_value)})")
+
+        threshold = self._meter_threshold or 500
+        state = "speaking" if rms_value >= threshold else "listening"
+        if state != self._voice_state:
+            self._voice_state = state
+            self._set_badge(state)
+
+        self._rms_history.append(rms_value)
+        self._redraw_waveform()
+
+    def _redraw_waveform(self):
+        """Draw the animated voice-activity bars on the metre canvas."""
         try:
             width = self.meter_canvas.winfo_width() or 400
-            fraction = min(rms_value / 4000.0, 1.0)
-            fill = int(width * fraction)
+            height = self.meter_canvas.winfo_height() or 64
+            self.meter_canvas.delete("all")
 
-            # Colour decides whether the sound is close to speech level.
+            n = len(self._rms_history)
+            if n == 0:
+                grey = "#21262d"
+                self.meter_canvas.create_text(
+                    width // 2, height // 2,
+                    text="waiting for voice...", fill=grey,
+                    font=(FONT_NAME, 8))
+                return
+
+            bar_w = max(3, width // 40)
+            gap = 2
+            x = 0.0
             threshold = self._meter_threshold or 500
-            if rms_value >= threshold:
-                color = "#f85149"          # at / above speech level (red)
-            elif rms_value >= threshold * 0.6:
-                color = "#d29922"           # approaching speech level (amber)
-            else:
-                color = "#238636"           # below speech level (green)
+            for rms in self._rms_history:
+                frac = min(rms / 4000.0, 1.0)
+                bar_h = max(2, int(height * frac))
+                if rms >= threshold:
+                    color = RED
+                elif rms >= threshold * 0.6:
+                    color = AMBER
+                else:
+                    color = GREEN
+                self.meter_canvas.create_rectangle(
+                    x, height - bar_h, x + bar_w, height,
+                    fill=color, outline="")
+                x += bar_w + gap
 
-            if self._meter_fill is not None:
-                self.meter_canvas.delete(self._meter_fill)
-            if self._meter_color != color:
-                self.meter_canvas.configure(bg=LOG_BG_COLOR)
-                self._meter_color = color
-            self._meter_fill = self.meter_canvas.create_rectangle(
-                0, 0, fill, 18, fill=color, outline="")
+            # Draw the speech threshold guide line.
+            ty = height - max(2, int(height * min(threshold / 4000.0, 1.0)))
+            self.meter_canvas.create_line(
+                0, ty, width, ty, fill="#58a6ff", dash=(2, 3))
+            self.meter_canvas.create_text(
+                width - 4, max(6, ty - 2), text="threshold", fill=ACCENT,
+                font=(FONT_NAME, 7), anchor="ne")
         except tk.TclError:
             pass  # window closing
+
+    def _set_badge(self, state):
+        """Colour the header status badge by the app's voice state."""
+        mapping = {
+            "idle":      (GREY, "IDLE"),
+            "listening": (GREEN, "LISTENING"),
+            "speaking":  (RED, "SPEAKING"),
+            "paused":    (AMBER, "PAUSED"),
+            "stopped":   (GREY, "IDLE"),
+        }
+        try:
+            bg, text = mapping.get(state, (GREY, "IDLE"))
+            self.status_badge.config(bg=bg, text=text)
+        except tk.TclError:
+            pass
 
     def _on_heard(self, text):
         """Show the latest recognized phrase (or an error hint)."""
@@ -768,6 +898,7 @@ class VoiceControlApp:
                     self.status_var.set(data)
                 elif kind == "running":
                     self._set_running(data)
+                    self._set_badge("listening" if data else "idle")
                 elif kind == "level":
                     self._on_level(int(data))
                 elif kind == "heard":
@@ -777,6 +908,7 @@ class VoiceControlApp:
                     self.threshold_var.set(f"speech threshold: {data:.0f}")
                 elif kind == "hand_state":
                     self.hand_state_var.set(data)
+                    self._set_hand_led(str(data))
                 elif kind == "hand_preview":
                     self._show_preview(data)
                 elif kind == "started":
@@ -792,6 +924,10 @@ class VoiceControlApp:
                 elif kind == "testdone" or kind == "autodone":
                     self.test_btn.config(state="normal")
                     self.auto_btn.config(state="normal")
+                elif kind == "timer":
+                    self._append_log(data)
+                elif kind == "clipcard":
+                    self._append_log(data)
                 elif kind == "quit":
                     self.on_close()
                     return
@@ -812,6 +948,150 @@ class VoiceControlApp:
                 self._append_log(f"Auto-selected microphone: {label}")
                 return
         self._append_log(f"Could not find device [{index}] in the list.")
+
+    # ------------------------------------------------------------------
+    # Clipboard history watcher (GUI thread)
+    # ------------------------------------------------------------------
+    def _watch_clipboard(self):
+        """Poll the OS clipboard and remember new text entries (max 8)."""
+        if not getattr(self, "_ready", False):
+            try:
+                self.root.after(800, self._watch_clipboard)
+                return
+            except tk.TclError:
+                return
+        try:
+            value = self.root.clipboard_get()
+            if (value and isinstance(value, str) and
+                    value != self._last_clip_value):
+                with self._clip_lock:
+                    self._clip_history.append(value)
+                    if len(self._clip_history) > 8:
+                        self._clip_history = self._clip_history[-8:]
+                self._last_clip_value = value
+        except tk.TclError:
+            pass
+        except Exception:
+            pass
+        try:
+            self.root.after(1200, self._watch_clipboard)
+        except tk.TclError:
+            pass
+
+    def _clip_text(self):
+        """Return a compact summary of the remembered clipboard entries."""
+        with self._clip_lock:
+            entries = list(self._clip_history)
+        if not entries:
+            return ("The clipboard history is empty. I store things "
+                    "after you say copy or cut.")
+        lines = ["Clipboard history (newest first):"]
+        for item in reversed(entries[-5:]):
+            short = item.replace("\n", " ").strip()
+            lines.append(f"  - {short[:90]}")
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Timer / reminder runner (worker thread)
+    # ------------------------------------------------------------------
+    def _timer_runner(self):
+        """Every second check for timers/reminders that have fired."""
+        while True:
+            try:
+                due = []
+                with self._timers_lock:
+                    now = time.time()
+                    keep = []
+                    for t in self._timers:
+                        if now >= t["due"]:
+                            due.append(t)
+                        else:
+                            keep.append(t)
+                    self._timers = keep
+                for t in due:
+                    self._post("timer",
+                               f"[TIMER] {t['label']} - time is up "
+                               f"({time.strftime('%H:%M')})")
+                    self._speak(f"Timer finished. {t['label']}")
+            except Exception as exc:
+                self._post("log", f"[!] Timer error: {exc}")
+            time.sleep(1.0)
+
+    def _set_timer(self, seconds, label):
+        """Queue a new countdown timer in the background."""
+        with self._timers_lock:
+            self._timers.append({"due": time.time() + seconds, "label": label})
+        self._post("log", f"[i] Timer set: {label} in {seconds:.0f} s.")
+        self._speak(f"Timer set. {label}.")
+
+    # ------------------------------------------------------------------
+    # Screen vision (capture + Gemini) helpers (worker thread)
+    # ------------------------------------------------------------------
+    def _grab_screen_png(self):
+        """Capture the full screen and return PNG bytes (Pillow on Windows)."""
+        if not PIL_OK or ImageGrab is None:
+            return None
+        img = ImageGrab.grab(all_screens=False)
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _ask_gemini_vision(self, question, image_bytes):
+        """Send a screenshot + question to Gemini and return (answer, err)."""
+        api_key = (self.config.get("gemini_api_key") or
+                   os.environ.get("GEMINI_API_KEY", ""))
+        if not api_key:
+            return None, ("Gemini is not configured. Add your API key to "
+                          "voc_config.json or the GEMINI_API_KEY variable.")
+        model = self.config.get("gemini_model", "gemini-2.0-flash")
+        url = ("https://generativelanguage.googleapis.com/v1beta/models/"
+               f"{model}:generateContent?key={api_key}")
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        parts = [{"text": question},
+                 {"inlineData": {"mimeType": "image/png", "data": b64}}]
+        try:
+            resp = self._http.post(
+                url,
+                json={"contents": [{"parts": parts}]},
+                headers={"Content-Type": "application/json"},
+                timeout=45,
+            )
+            data = resp.json()
+            if resp.status_code != 200:
+                message = data.get("error", {}).get("message", resp.reason)
+                return None, f"Gemini error ({resp.status_code}): {message}"
+            cand = data.get("candidates", [{}])[0].get("content", {}).get(
+                "parts", [])
+            texts = [p.get("text", "") for p in cand if p.get("text")]
+            if not texts:
+                return None, "Gemini returned an empty answer."
+            return texts[0].strip(), None
+        except requests.exceptions.RequestException as exc:
+            return None, f"Network error contacting Gemini: {exc}"
+        except (ValueError, KeyError, IndexError) as exc:
+            return None, f"Unexpected Gemini response: {exc}"
+
+    def _analyze_screen(self, question):
+        """Worker-thread: screenshot the screen and ask Gemini to look at it."""
+        self._post("status", "Capturing screen...")
+        self._post("log", "[i] Taking a screenshot for analysis...")
+        image = self._grab_screen_png()
+        if not image:
+            self._post("log", "[!] Could not capture the screen.")
+            self._speak("I could not capture the screen.")
+            return
+        if not question:
+            question = ("Describe what is currently visible on this "
+                        "computer screen in 2-3 sentences.")
+        self._post("status", "Asking Gemini to look at the screen...")
+        answer, error = self._ask_gemini_vision(question, image)
+        if error:
+            self._post("log", f"[!] {error}")
+            self._speak("I could not analyze the screen.")
+        else:
+            self._post("log", f"\n[SCREEN ANALYSIS]\n{answer}")
+            self._speak(self._shorten(answer, 240))
+        self._post("status", "Listening...")
 
     def _append_log(self, line):
         """Insert a timestamped line (or multi-line block) into the log."""
@@ -836,6 +1116,8 @@ class VoiceControlApp:
             self.test_btn.config(state="normal")
             self.auto_btn.config(state="normal")
             self.threshold_var.set("speech threshold: --")
+        self._voice_state = "listening" if running else "idle"
+        self._set_badge(self._voice_state)
 
     # ------------------------------------------------------------------
     # Public controls (called by the buttons)
@@ -1187,6 +1469,44 @@ class VoiceControlApp:
                 self._speak("Stopping hand cursor.")
             return
 
+        # ---- Screen analysis via Gemini Vision ----------------------------
+        if re.search(r"\b(analy[sz]e|scan|describe|read|what (is|are|do you "
+                     r"see)|look at|show me)\b.*\bscreen\b", lowered) or \
+           lowered in ("screen analysis", "analyze screen", "scan screen",
+                       "what is on my screen", "what do you see",
+                       "what is on the screen"):
+            m = re.search(r"\b(what|describe|explain|tell|read)\b.*",
+                          lowered, re.I)
+            question = m.group(0) if m else ""
+            threading.Thread(target=self._analyze_screen,
+                             args=(question,), daemon=True).start()
+            return
+
+        # ---- Timer / reminder --------------------------------------------
+        m = re.match(
+            r"(?:^|\b)(?:(?:set\s+(?:an?\s+)?(?:timer|alarm|remind(?:er)?))|"
+            r"(?:remind(?:er)?\s+(?:me\s+|us\s+)?)|(?:timer\s+)|"
+            r"(?:alarm\s+))\s*(?:for\s+|in\s+|at\s+)?(.+)", lowered
+        )
+        if m:
+            raw = m.group(1).strip()
+            seconds = self._parse_duration(raw) or self._parse_absolute(raw)
+            if seconds and seconds > 0:
+                self._set_timer(seconds, raw)
+            else:
+                self._speak(
+                    "I did not understand the time. "
+                    "Say for example: set a timer for 5 minutes.")
+            return
+
+        # ---- Clipboard history -------------------------------------------
+        if re.search(r"\b(clipboard|copy history|what did i (copy|cut)"
+                     r"|show (me )?my clipboard|paste history)\b", lowered):
+            text = self._clip_text()
+            self._post("log", f"[i] {text}")
+            self._speak(text[:220])
+            return
+
         # ============ Discrete command keywords ==========================
         if "close window" in lowered or "close the window" in lowered:
             self._safe_keys(lambda: pyautogui.hotkey("alt", "f4"))
@@ -1459,6 +1779,49 @@ class VoiceControlApp:
             return cut[:last_period + 1]
         return cut.rsplit(" ", 1)[0] + "."
 
+    @staticmethod
+    def _parse_duration(raw):
+        """Convert a human duration like '5 minutes 30 seconds' to seconds."""
+        total = 0
+        for match in re.finditer(r"(\d+)\s*(h(?:ou)?r|min(?:ute)?|sec(?:ond)?)",
+                                 raw, re.I):
+            val = int(match.group(1))
+            unit = match.group(2).lower()
+            if unit.startswith("h"):
+                total += val * 3600
+            elif unit.startswith("m"):
+                total += val * 60
+            else:
+                total += val
+        return total if total else None
+
+    @staticmethod
+    def _parse_absolute(raw):
+        """Parse an absolute clock time like 'at 3 o'clock' or 'at 3:30 pm'."""
+        m = re.search(
+            r"(\d{1,2})(?::(\d{2}))?\s*(?:o\s*clock|hour)?\s*"
+            r"(a\.?m\.?|p\.?m\.?|am|pm)?", raw, re.I)
+        if not m:
+            return None
+        hour = int(m.group(1))
+        minute = int(m.group(2) or 0)
+        if hour > 24 or minute > 59:
+            return None
+        meridiem = (m.group(3) or "").lower().replace(".", "")
+        if meridiem.startswith("p") and hour < 12:
+            hour += 12
+        elif meridiem.startswith("a") and hour == 12:
+            hour = 0
+        if hour > 23:
+            return None
+        now = time.localtime()
+        due = time.mktime((now.tm_year, now.tm_mon, now.tm_mday,
+                          hour, minute, 0, 0, 0, -1))
+        seconds = due - time.time()
+        if seconds <= 0:
+            seconds += 86400  # already passed today -> tomorrow
+        return int(seconds)
+
     def _launch_app(self, name):
         """Launch an app by known file path."""
         for path in APP_PATHS.get(name, []):
@@ -1661,10 +2024,27 @@ class VoiceControlApp:
         """Update hand-cursor button states and status label (GUI thread)."""
         try:
             self.hand_state_var.set(text)
+            self.hand_led.config(bg="#3a3f45" if not running else "#238636")
             self.hand_btn.config(
                 state="disabled" if running else "normal")
             self.hand_stop_btn.config(
                 state="normal" if running else "disabled")
+        except tk.TclError:
+            pass  # window closing
+
+    def _set_hand_led(self, text):
+        """Colour the status LED by the recognised gesture (GUI thread)."""
+        upper = (text or "").upper()
+        try:
+            if "CLICK" in upper or "DRAG" in upper:
+                color = "#f85149"          # red = mouse button active
+            elif "SCROLL" in upper:
+                color = "#d29922"          # amber = scrolling
+            elif "MOVE" in upper:
+                color = "#238636"          # green = moving pointer
+            else:
+                color = "#3a3f45"          # grey = no gesture
+            self.hand_led.config(bg=color)
         except tk.TclError:
             pass  # window closing
 
@@ -1691,6 +2071,8 @@ class VoiceControlApp:
     def on_close(self):
         """Clean up threads and close the window."""
         self._listening_event.clear()
+        with self._timers_lock:
+            self._timers = []
         save_config(self.config)
         if getattr(self, "_hand_engine", None) is not None:
             try:
