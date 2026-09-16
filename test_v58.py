@@ -1,13 +1,15 @@
-"""Smoke-test suite for VoiceControlApp v5.6.0 (clean-shutdown hardening).
+"""Smoke-test suite for VoiceControlApp v5.7.0 (settings persistence + UI).
 
-Supersedes test_v56.py: keeps all v5.2..v5.5.0 regression checks and adds
-the v5.6.0 teardown coverage:
+Supersedes test_v57.py: keeps all v5.2..v5.6.0 regression checks and adds
+the v5.7.0 coverage:
 
-  * on_close signals every worker thread (timer flag, TTS sentinel), joins
-    the timer runner, destroys leftover toast popups and closes the Gemini
-    HTTP session.
-  * every root.after() loop (queue poller, clipboard watcher) stops
-    re-scheduling the instant _closing is set.
+  * camera/preview/beep/voice/rate/sensitivity/scroll-settings now persist
+    to voc_config.json the instant they change (save_config called from the
+    GUI callbacks).
+  * the TTS voice dropdown pre-selects the saved profile (stored voice id
+    is matched back to its display name).
+  * the gemini_model fallback is consistent with the canonical default.
+  * (kept) v5.6.0 on_close teardown + after() closing guards.
 """
 import os
 import sys
@@ -625,6 +627,48 @@ assert app._calib_phase in (0, 1, 2)
 app._closing = False
 print("Calibration closing guard OK")
 
+# ----------------------------------------------------------------------
+# v5.7.0 NEW: settings persistence + voice preselection + gemini fallback
+# ----------------------------------------------------------------------
+print("--- SETTINGS SAVE-CONFIG PERSISTENCE (v5.7.0) ---")
+saved_calls = []
+orig_save = va.save_config
+va.save_config = lambda cfg: saved_calls.append(dict(cfg))
+try:
+    app._on_rate_change(180)
+    assert app.config["voice_rate"] == 180 and len(saved_calls) == 1, \
+        saved_calls
+    app._on_beep_toggle()
+    app._on_sensitivity_change(float(app.sensitivity_var.get()))
+    app._on_scroll_speed_change(float(app.scroll_speed_var.get()))
+    assert len(saved_calls) == 4, saved_calls
+finally:
+    va.save_config = orig_save
+print("Settings save-config persistence OK")
+
+print("--- VOICE PRESELECTION BY ID-NAME MATCH (v5.7.0) ---")
+app._voice_id_by_name = {"David": "id-a", "Zira": "id-b"}
+orig_voice_id = app.config.get("voice_id", "")
+app.config["voice_id"] = "id-b"
+app._populate_voice_menu([("David", "id-a"), ("Zira", "id-b")])
+for _ in range(5):
+    drain_queue()
+    root.update()
+    if app.voice_var.get():
+        break
+    time.sleep(0.01)
+assert app.voice_var.get() == "Zira", \
+    f"voice dropdown should preselect Zira, got {app.voice_var.get()!r}"
+app.config["voice_id"] = orig_voice_id
+print("Voice preselection OK")
+
+print("--- GEMINI MODEL FALLBACK CONSISTENT (v5.7.0) ---")
+src = open("voice_app.py", encoding="utf-8").read()
+assert '"gemini_model": "gemini-3.6-flash"' in src
+assert 'get("gemini_model", "gemini-2.0-flash")' not in src, \
+    "stale gemini-2.0-flash fallback still present"
+print("Gemini model fallback OK")
+
 print("--- TOAST CLEANUP + TIMER EXIT + HTTP CLOSE (v5.6.0) ---")
 # Park a live toast so on_close has something to destroy.
 app._show_toast("TEST", "toast to clean up", duration_ms=60000)
@@ -637,7 +681,7 @@ close_engine._running = True
 close_engine.stopped = 0
 app._hand_engine = close_engine
 
-print("=== ALL v5.6.0 TESTS PASSED ===")
+print("=== ALL v5.7.0 TESTS PASSED ===")
 app.on_close()  # real shutdown: engine.stop, toast cleanup, timer join, destroy
 
 # Re-tag the final success line printed above: on_close has now run.
@@ -728,4 +772,4 @@ app.config["hand_mode"] = orig_hand_mode
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.6.0 TESTS PASSED ===")
+print("=== ALL v5.7.0 TESTS PASSED ===")

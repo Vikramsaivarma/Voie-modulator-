@@ -14,13 +14,15 @@ WHAT "KEEP IN A TEXT" MEANS FOR YOU
 ===============================================================================
 Ship the remaining Phase D roadmap in small, tested batches for the Windows
 "super app" (voice_app.py + hand_cursor.py) in C:\Users\Jo\Desktop\voicemodule.
-Latest shipped batch: v5.6.0 (spiral 3 - clean-shutdown hardening: on_close
-signals/joins the timer thread, destroys leftover toasts, closes the Gemini
-HTTP session, and every root.after() loop stops re-scheduling once _closing
-is set). Spiral 2 was v5.5.0 (GUI thread-safe marshalling); spiral 1 was
-hand_cursor v1.8.0 (gesture safety). Hard rule: the Gemini API key stays
-LOCAL ONLY in the gitignored voc_config.json - it must never appear in git
-history, diff output, or any pushed file. voc_log.txt is also gitignored.
+Latest shipped batch: v5.7.0 (spiral 4 - settings persistence: camera/
+preview/beep/voice/rate/sensitivity/scroll now save to voc_config.json the
+instant they change, the TTS voice dropdown pre-selects the saved profile,
+and the gemini_model fallback is consistent). Spiral 3 was v5.6.0 (clean
+shutdown hardening); spiral 2 was v5.5.0 (GUI-thread marshalling); spiral 1
+was hand_cursor v1.8.0 (gesture safety). Hard rule: the Gemini API key
+stays LOCAL ONLY in the gitignored voc_config.json - it must never appear
+in git history, diff output, or any pushed file. voc_log.txt is also
+gitignored.
 
 ===============================================================================
 2) QUICK FACTS
@@ -30,7 +32,7 @@ history, diff output, or any pushed file. voc_log.txt is also gitignored.
   webcam). Zero strays must remain after a test run.
 - Repo: C:\Users\Jo\Desktop\voicemodule, branch main, remote:
   https://github.com/Vikramsaivarma/Voie-modulator-.git
-- Versions CURRENTLY on disk/pushed: voice_app.py 5.6.0, hand_cursor.py 1.8.0.
+- Versions CURRENTLY on disk/pushed: voice_app.py 5.7.0, hand_cursor.py 1.8.0.
 - Pushed history:
   9491bf9 v5.0 full-scale (beeps, TTS profiles, Gemini memory, cursor vision,
           log persistence, autostart)
@@ -44,12 +46,13 @@ history, diff output, or any pushed file. voc_log.txt is also gitignored.
   ae64a8c v1.8.0 hand-engine gesture safety (spiral 1: phantom-click fixes,
           macro-stroke gating, lifecycle lock)
   05a2611 v5.5.0 GUI thread marshalling (spiral 2)
-  <latest> v5.6.0 clean-shutdown hardening (spiral 3) - THIS batch
+  d7d8dfd v5.6.0 clean-shutdown hardening (spiral 3)
+  <latest> v5.7.0 settings persistence + voice preselect (spiral 4) - THIS batch
 - Deps (requirements.txt): speech_recognition, pyttsx3, pyautogui, pyaudio,
   opencv, mediapipe, pillow, requests, pystray, keyboard.
 
 ===============================================================================
-3) CURRENT ARCHITECTURE (v5.6.0)
+3) CURRENT ARCHITECTURE (v5.7.0)
 ===============================================================================
 - voice_app.py ~3600 lines: tkinter GUI + controller. Threads: stt, tts,
   timers. GUI thread: clipboard watcher, waveform meter, hand preview, log,
@@ -118,20 +121,24 @@ DONE:
 - v5.6.0 clean-shutdown hardening (spiral 3) implemented + tested
   (test_v57.py), committed, pushed: timer-runner exit flag + join, toast
   cleanup, HTTP session close, _closing guards on every after() loop.
+- v5.7.0 settings persistence + UI polish (spiral 4) implemented + tested
+  (test_v58.py), committed, pushed: live save_config() in every settings
+  callback, voice-dropdown pre-select of the saved profile, consistent
+  gemini_model fallback.
 - ALL local tests currently pass: "C:\Users\Jo\anaconda3\python.exe"
-  test_v57.py  -> "=== ALL v5.6.0 TESTS PASSED ===" and 0 stray python procs.
+  test_v58.py  -> "=== ALL v5.7.0 TESTS PASSED ===" and 0 stray python procs.
 - git working tree CLEAN, main == origin/main (nothing pending).
 - install.bat verifies core imports and pystray/keyboard (warn-only).
 - PLAN.txt + QUICK_START.txt updated to v5.5.0.
 
 OPEN / NEXT:
-- Next spiral batches (spiral model - SPIRAL 4 = UI/config polish, SPIRAL 5
-  = two-hand support).
+- Next spiral batches (spiral model - SPIRAL 5 = two-hand support, SPIRAL 6
+  = packaging/UI polish).
 - TODO list in PLAN.txt "4) NEXT SHIPMENT":
   1. Two-hand support (primary pointer hand + modifier hand) - Phase D.
   2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
   3. After each batch: py_compile voice_app.py hand_cursor.py, run the
-     current smoke suite (test_v57.py -> create test_v58.py, delete the
+     current smoke suite (test_v58.py -> create test_v59.py, delete the
      old one), update QUICK_START.txt + PLAN.txt + this HANDOFF, then
      git add -A && commit && push to origin/main.
 - Conventions for a new batch/version:

@@ -76,6 +76,12 @@
    session, and every after() loop (queue poller, clipboard watcher,
    calibration wizard) stops re-scheduling the moment _closing is set - so
    no callback can touch a destroyed window.
+ * SETTINGS PERSISTENCE (v5.7.0): camera, preview, click-beep, TTS voice,
+   speech rate, hand sensitivity and scroll speed are now saved to
+   voc_config.json the instant you touch them (previously they only stuck
+   for the current session). The saved TTS voice now pre-selects correctly
+   in the dropdown (the stored voice id is matched back to its display
+   name), and the Gemini model fallback is consistent everywhere.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -126,7 +132,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.6.0
+VERSION   : 5.7.0
 ================================================================================
 """
 
@@ -1469,7 +1475,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         if not api_key:
             return None, ("Gemini is not configured. Add your API key to "
                           "voc_config.json or the GEMINI_API_KEY variable.")
-        model = self.config.get("gemini_model", "gemini-2.0-flash")
+        model = self.config.get("gemini_model", "gemini-3.6-flash")
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={api_key}")
         b64 = base64.b64encode(image_bytes).decode("ascii")
@@ -2498,7 +2504,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         if not api_key:
             return None, ("Gemini is not configured. Add your API key to "
                           "voc_config.json or the GEMINI_API_KEY variable.")
-        model = self.config.get("gemini_model", "gemini-2.0-flash")
+        model = self.config.get("gemini_model", "gemini-3.6-flash")
         url = ("https://generativelanguage.googleapis.com/v1beta/models/"
                f"{model}:generateContent?key={api_key}")
         with self._gemini_lock:
@@ -2873,27 +2879,33 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self.config["camera_index"] = int(self.camera_var.get())
         except (TypeError, ValueError):
             pass
+        save_config(self.config)
 
     def _on_preview_toggle(self):
+        self.config["show_preview"] = bool(self.preview_var.get())
         if self._hand_engine is not None:
             self._hand_engine.set_emit_preview(bool(self.preview_var.get()))
         if not self.preview_var.get():
             self.preview_canvas.configure(text="(preview turned off)")
+        save_config(self.config)
 
     def _on_sensitivity_change(self, _val):
         self.config["hand_sensitivity"] = float(self.sensitivity_var.get())
         if self._hand_engine is not None:
             self._hand_engine.set_sensitivity(float(self.sensitivity_var.get()))
+        save_config(self.config)
 
     def _on_scroll_speed_change(self, _val):
         self.config["hand_scroll_speed"] = float(self.scroll_speed_var.get())
         if self._hand_engine is not None:
             self._hand_engine.set_scroll_speed(float(self.scroll_speed_var.get()))
+        save_config(self.config)
 
     def _on_beep_toggle(self):
         self.config["click_beep"] = bool(self.click_beep_var.get())
         if self.click_beep_var.get():
             self._append_log("[i] Hand click sounds: ON")
+        save_config(self.config)
 
     def _on_autostart_toggle(self):
         enable = bool(self.autostart_var.get())
@@ -2903,6 +2915,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
 
     def _on_rate_change(self, _val):
         self.config["voice_rate"] = int(self.tts_rate_var.get())
+        save_config(self.config)
 
     def _on_voice_change(self, choice):
         """Save the chosen TTS voice id; the TTS thread applies it live."""
@@ -2912,6 +2925,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             voice_id = self._voice_id_by_name.get(choice, "")
             self.config["voice_id"] = voice_id
         self._append_log(f"[i] TTS voice: {choice}")
+        save_config(self.config)
 
     def _populate_voice_menu(self, voices):
         """Populate the TTS voice dropdown from the pyttsx3 engine.
@@ -2933,8 +2947,12 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 command=lambda v=name: self.voice_var.set(v) or
                 self._on_voice_change(v))
         saved = self.config.get("voice_id", "")
-        if saved and saved in self._voice_id_by_name:
-            self.voice_var.set(saved)
+        # The dropdown options are display NAMES; convert the stored voice
+        # id back to its name so the saved profile actually pre-selects.
+        saved_name = next((n for n, vid in self._voice_id_by_name.items()
+                           if vid == saved), "")
+        if saved_name:
+            self.voice_var.set(saved_name)
 
     def _on_hand_size(self, hand_size):
         """Collect live hand-size samples while calibration is active.
