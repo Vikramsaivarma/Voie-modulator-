@@ -47,18 +47,24 @@
  * GESTURE TRAINER (v5.2): press TRAIN GESTURES (or say "train gestures")
    for a live pass/fail panel of every pose. While it is open the mouse
    is paused and each gesture lights up green once your hand holds it.
-  * TOUCHPAD MODE (v5.4): press TOUCHPAD (or say "touchpad mode") to turn
-   the hand into a RELATIVE mouse / laptop trackpad - the pointer follows
-   hand movement, not absolute position, so you get fine mouse-like
-   control. Same gestures (pinch=click, peace=scroll, 3 fingers=right
-   click, fist=drag). Say "stop touchpad" to go back to the reach-gated
-   cursor.
-  * DRAW MACROS (v5.3): press DRAW MACROS (or say "draw macros") and trace
+ * DRAW MACROS (v5.3): press DRAW MACROS (or say "draw macros") and trace
    a shape in the air with your index finger - the stroke is recognised
    when the finger stops for ~1 s or leaves the frame, then the action
    fires. Shapes (remappable via the macro_actions config): circle=lock
    screen, v=new tab, check=copy, l=minimize, s=open settings, z=close
    tab, w=play or pause, line=mute, slash=maximize.
+ * TOUCHPAD MODE (v5.4): press TOUCHPAD (or say "touchpad mode") to turn
+   the hand into a RELATIVE mouse / laptop trackpad - the pointer follows
+   hand movement, not absolute position, so you get fine mouse-like
+   control. Same gestures (pinch=click, peace=scroll, 3 fingers=right
+   click, fist=drag). Say "stop touchpad" to go back to the reach-gated
+   cursor.
+ * CAMERA LIFECYCLE FIXES (v5.4.1): the webcam can now be turned off (and
+   back on) reliably. Stopping force-releases the camera from the engine,
+   stale engine threads are reaped before a restart, and the STOP button /
+   "stop hand cursor" always resets the UI even if the engine died without
+   saying goodbye. Restarting after a stop no longer fails because the old
+   capture is still held.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -109,7 +115,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.4.0
+VERSION   : 5.4.1
 ================================================================================
 """
 
@@ -2965,9 +2971,18 @@ text="Say: Open <app> | Type <text> | Search <query> | "
 
     def start_hand_cursor(self):
         """Create the engine (if needed) and start it. GUI/thread-safe."""
-        if (self._hand_engine is not None and
-                self._hand_engine.is_running()):
-            return
+        old = getattr(self, "_hand_engine", None)
+        if old is not None:
+            if old.is_running():
+                return
+            # A previous engine whose thread died (camera error, stop raced)
+            # is still holding the capture object - reap it so the webcam
+            # is truly free before a fresh engine tries to open it.
+            try:
+                old.stop()
+            except Exception:
+                pass
+            self._hand_engine = None
         if not HAND_DEPS_OK or HandCursorEngine is None:
             self._post("log", "[!] Hand-tracking packages missing - run: "
                               "pip install mediapipe pillow")
@@ -3005,6 +3020,28 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             except Exception as exc:
                 self._post("log", f"[!] {exc}")
         self._hand_engine = None
+        # Belt and braces: make sure the button states + preview reset even
+        # if the engine died before it could post a "stopped" event.
+        try:
+            self.root.after(0, self._reset_hand_ui_stopped)
+        except tk.TclError:
+            pass
+
+    def _reset_hand_ui_stopped(self):
+        """Force-reset the hand-cursor UI widgets (GUI thread only).
+
+        Called via root.after from stop_hand_cursor so the button/LED always
+        returns to the off state, even when the engine thread was killed
+        before it could post the "stopped" event to the queue.
+        """
+        try:
+            self._set_hand_ui(False, "hand: off")
+            if self._train_window is not None:
+                self._close_trainer()
+            self.preview_canvas.configure(
+                image="", text="(camera off)")
+        except tk.TclError:
+            pass
 
     def _hand_event(self, kind, data):
         """Callback from the engine thread -> forward into the GUI queue."""
@@ -3439,6 +3476,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 self._hand_engine.stop()
             except Exception:
                 pass
+            self._hand_engine = None
         # Stop the tray icon and unregister the global hotkey.
         if self._tray_hotkey is not None and KEYBOARD_OK:
             try:

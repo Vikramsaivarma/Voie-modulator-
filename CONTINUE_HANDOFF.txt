@@ -14,7 +14,8 @@ WHAT "KEEP IN A TEXT" MEANS FOR YOU
 ===============================================================================
 Ship the remaining Phase D roadmap in small, tested batches for the Windows
 "super app" (voice_app.py + hand_cursor.py) in C:\Users\Jo\Desktop\voicemodule.
-Latest shipped batch: v5.4 (touchpad mode). Hard rule: the Gemini API key
+Latest shipped batch: v5.4.1 (webcam lifecycle fixes: reliable STOP/START,
+force-released camera, ghost-thread reaping). Hard rule: the Gemini API key
 stays LOCAL ONLY in the gitignored voc_config.json - it must never appear in
 git history, diff output, or any pushed file. voc_log.txt is also gitignored.
 
@@ -26,7 +27,7 @@ git history, diff output, or any pushed file. voc_log.txt is also gitignored.
   webcam). Zero strays must remain after a test run.
 - Repo: C:\Users\Jo\Desktop\voicemodule, branch main, remote:
   https://github.com/Vikramsaivarma/Voie-modulator-.git
-- Versions CURRENTLY on disk/pushed: voice_app.py 5.4.0, hand_cursor.py 1.7.0.
+- Versions CURRENTLY on disk/pushed: voice_app.py 5.4.1, hand_cursor.py 1.7.1.
 - Pushed history:
   9491bf9 v5.0 full-scale (beeps, TTS profiles, Gemini memory, cursor vision,
           log persistence, autostart)
@@ -36,11 +37,12 @@ git history, diff output, or any pushed file. voc_log.txt is also gitignored.
           global hotkey (pystray 0.19.5, keyboard 0.13.5)
   e2faca0 v5.3 draw-macro gestures ($1-style shape recognizer)
   330ad97 v5.4 touchpad / relative-mouse mode
+  4820dd2 v5.4.1 webcam lifecycle fixes (camera on/off reliability)
 - Deps (requirements.txt): speech_recognition, pyttsx3, pyautogui, pyaudio,
   opencv, mediapipe, pillow, requests, pystray, keyboard.
 
 ===============================================================================
-3) CURRENT ARCHITECTURE (v5.4)
+3) CURRENT ARCHITECTURE (v5.4.1)
 ===============================================================================
 - voice_app.py ~3500 lines: tkinter GUI + controller. Threads: stt, tts,
   timers. GUI thread: clipboard watcher, waveform meter, hand preview, log,
@@ -63,7 +65,9 @@ git history, diff output, or any pushed file. voc_log.txt is also gitignored.
   runs it via handle_command on a daemon thread.
 
 - hand_cursor.py: MediaPipe engine (daemon). Landmark constants defined.
-  v1.7.0 driver modes:
+  v1.7.1 driver modes + camera-lifecycle fixes (stop() force-releases the
+  capture; start() reaps a still-alive thread; _run() releases on open
+  failure, tolerates transient bad reads, 640x480 + 1-frame buffer):
     "cursor"  - absolute mapping _to_screen + reach gate (arm/disarm,
                 hysteresis), STABLE_FRAMES=5 debounce, pinch hysteresis,
                 ambiguous poses fall back to MOVE.
@@ -84,19 +88,23 @@ git history, diff output, or any pushed file. voc_log.txt is also gitignored.
 4) WORK STATE
 ===============================================================================
 DONE:
-- v5.0..v5.4 all implemented, tested (test_v54.py), committed, pushed.
+- v5.0..v5.4 all implemented, tested, committed, pushed. v5.4.1 fixes the
+  webcam lifecycle (see "DONE" stats below).
+- v5.4.1 camera-lifecycle fixes implemented + tested (test_v55.py),
+  committed, pushed. STOP now force-releases the webcam; stale engine
+  threads are reaped before a fresh START; the stop UI always resets.
 - ALL local tests currently pass: "C:\Users\Jo\anaconda3\python.exe"
-  test_v54.py  -> "=== ALL v5.4 TESTS PASSED ===" and 0 stray python procs.
+  test_v55.py  -> "=== ALL v5.4.1 TESTS PASSED ===" and 0 stray python procs.
 - git working tree CLEAN, main == origin/main (nothing pending).
 - install.bat verifies core imports and pystray/keyboard (warn-only).
-- PLAN.txt + QUICK_START.txt updated to v5.4.
+- PLAN.txt + QUICK_START.txt updated to v5.4.1.
 
 OPEN / NEXT:
 - TODO list in PLAN.txt "4) NEXT SHIPMENT":
   1. Two-hand support (primary pointer hand + modifier hand) - Phase D.
   2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
   3. After each batch: py_compile voice_app.py hand_cursor.py, run
-     test_v54.py (create test_v55.py, delete the old one), update
+     test_v55.py (create test_v56.py, delete the old one), update
      QUICK_START.txt + PLAN.txt, git add -A && commit && push to origin/main.
 - Conventions for a new batch/version:
   * Bump voice_app.py docstring VERSION (e.g. 5.5.0) + a FEATURES bullet;
@@ -105,7 +113,7 @@ OPEN / NEXT:
     save_config(self.config) (NOT self._save_config - it does not exist).
   * New GUI buttons go in the hand_actions second row; voice commands added
     BEFORE the Gemini-fallback return; update HELP_TEXT.
-  * New smoke suite: copy test_v54.py, add the new feature's checks, keep
+  * New smoke suite: copy test_v55.py, add the new feature's checks, keep
     ALL regression checks. Self-heal at top: remember orig macro/touchpad
     config values, force False, save; restore at end. Use va.save_config.
   * The tray/hotkey/engine-classification tests hit real subsystems - the
@@ -116,7 +124,7 @@ OPEN / NEXT:
 ===============================================================================
 1. Kill strays:  Get-Process python*,pythonw -EA SilentlyContinue | Stop-Process -Force
 2. & "C:\Users\Jo\anaconda3\python.exe" -m py_compile voice_app.py hand_cursor.py
-3. & "C:\Users\Jo\anaconda3\python.exe" test_v54.py   (or current test file)
+3. & "C:\Users\Jo\anaconda3\python.exe" test_v55.py   (or current test file)
 4. Confirm 0 stray python processes after.
 5. git add -A; git commit -m "v5.x: <short feature>"; git push origin main.
 

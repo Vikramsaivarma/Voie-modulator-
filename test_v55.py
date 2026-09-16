@@ -1,7 +1,7 @@
-"""Smoke-test suite for VoiceControlApp v5.4 features (touchpad mode).
+"""Smoke-test suite for VoiceControlApp v5.4.1 (camera lifecycle fixes).
 
-Supersedes test_v53.py: keeps v5.2/v5.3 regression checks and adds the
-touchpad (relative-mouse) engine + GUI + voice-command coverage.
+Supersedes test_v54.py: keeps all v5.2/v5.3/v5.4 regression checks and adds
+the v5.4.1 webcam start/stop/restart + stale-engine-reap coverage.
 """
 import os
 import sys
@@ -22,6 +22,41 @@ root.withdraw()
 app = va.VoiceControlApp()
 root.update()
 
+# Self-heal: interrupted runs may have left macro/touchpad/hand_mode on.
+# Remember the originals, force safe defaults, restore them in the cleanup.
+orig_macro_mode = bool(app.config.get("macro_mode", False))
+orig_touchpad_mode = bool(app.config.get("touchpad_mode", False))
+orig_hand_mode = app.config.get("hand_mode", "on")
+app._macro_mode_var.set(False)
+app._touchpad_var.set(False)
+app.config["macro_mode"] = False
+app.config["touchpad_mode"] = False
+app.config["hand_mode"] = "off"     # stop any GUI auto-start of the webcam
+va.save_config(app.config)
+assert app.config.get("macro_mode", None) is False
+assert app.config.get("touchpad_mode", None) is False
+print("Mode config reset (originals saved) OK")
+
+
+def _cleanup_on_error(exc_type, exc, tb):
+    """Never leave a hung voice_app process holding the webcam."""
+    try:
+        app.config["macro_mode"] = bool(orig_macro_mode)
+        app.config["touchpad_mode"] = bool(orig_touchpad_mode)
+        app.config["hand_mode"] = orig_hand_mode
+        va.save_config(app.config)
+    except Exception:
+        pass
+    try:
+        app.on_close()
+    except Exception:
+        pass
+    raise exc
+
+
+import sys
+sys.excepthook = _cleanup_on_error
+
 print("--- WIDGET SMOKE ---")
 vars_ok = all(hasattr(app, a) for a in [
     "autostart_var", "click_beep_var", "voice_var",
@@ -37,19 +72,6 @@ assert cfg.get("tray_hotkey", "") == "ctrl+alt+v"
 assert cfg.get("macro_actions", None) == {}
 assert cfg.get("touchpad_gain", None) == 2.5
 print("Config defaults OK")
-
-# Self-heal: interrupted runs may have left macro/touchpad on. Remember the
-# originals, force defaults, and restore them in the cleanup below.
-orig_macro_mode = bool(cfg.get("macro_mode", False))
-orig_touchpad_mode = bool(cfg.get("touchpad_mode", False))
-app._macro_mode_var.set(False)
-app._touchpad_var.set(False)
-app.config["macro_mode"] = False
-app.config["touchpad_mode"] = False
-va.save_config(app.config)
-assert app.config.get("macro_mode", None) is False
-assert app.config.get("touchpad_mode", None) is False
-print("Mode config reset (originals saved) OK")
 
 print("--- MACRO DEFAULT ACTIONS (v5.3 regression) ---")
 assert va.MACRO_DEFAULT_ACTIONS["circle"] == "lock screen"
@@ -68,7 +90,7 @@ print("Trainer gesture map OK")
 
 print("--- ENGINE TRAINING (synthetic landmarks, v5.2 regression) ---")
 import hand_cursor as hc
-from hand_cursor import HandCursorEngine
+from hand_cursor import HandCursorEngine, available_cameras
 
 
 def landmark(x, y):
@@ -189,7 +211,7 @@ engine._screen = (1920, 1080)
 engine.sensitivity = 1.0
 engine._cursor = (960, 540)
 
-# Build a "move" hand; touchpad only reads WRIST + MIDDLE_MCP for motion.
+
 def shift_center(hand, dx):
     hand[hc.WRIST] = landmark(0.50 + dx, 0.95)
     hand[hc.MIDDLE_MCP] = landmark(0.52 + dx, 0.86)
@@ -200,16 +222,13 @@ first = shift_center(make_hand([False, True, False, False, False],
                                (0.49, 0.60), (0.50, 0.30)), 0.0)
 engine._handle_landmarks(first)
 c0 = engine._cursor
-# Same hand -> no drift.
 engine._handle_landmarks(first)
 assert engine._cursor == c0, "cursor drifted with a stationary hand"
-# Hand slides right -> pointer moves right (relative, no teleport).
 right = shift_center(make_hand([False, True, False, False, False],
                                (0.49, 0.60), (0.50, 0.30)), 0.30)
 engine._handle_landmarks(right)
 c1 = engine._cursor
 assert c1[0] > c0[0], f"pointer should move right: {c0} -> {c1}"
-# Hand slides down -> pointer moves down.
 down = shift_center(make_hand([False, True, False, False, False],
                               (0.49, 0.60), (0.50, 0.30)), 0.30)
 down[hc.WRIST] = landmark(0.65, 0.95 + 0.30)
@@ -248,7 +267,6 @@ print("--- TOUCHPAD/MACROS MUTUAL EXCLUSION ---")
 app._hand_engine = fake
 app.handle_command("touchpad mode")
 assert app._touchpad_var.get() is True
-# Enabling touchpad cleared the macro toggle.
 app.handle_command("draw macros")
 assert app._macro_mode_var.get() is True
 app.handle_command("touchpad mode")  # touchpad wins -> macro off
@@ -296,11 +314,11 @@ print("Tray icon + hotkey started OK")
 print("--- LOG PERSISTENCE (v5.2 regression) ---")
 log_path = os.path.join(os.path.dirname(os.path.abspath("voice_app.py")),
                         "voc_log.txt")
-app._append_log("[TEST] persistence marker v5.4")
+app._append_log("[TEST] persistence marker v5.4.1")
 assert os.path.exists(log_path)
 with open(log_path, "r", encoding="utf-8") as f:
     lines = f.readlines()
-assert any("persistence marker v5.4" in l for l in lines)
+assert any("persistence marker v5.4.1" in l for l in lines)
 print("Log persistence OK")
 
 print("--- CHAIN PARSE (v5.2 regression) ---")
@@ -330,11 +348,168 @@ except FileNotFoundError:
     pass
 print("Autostart registry OK")
 
-# Restore the local config to the values the suite started with.
+# ----------------------------------------------------------------------
+# v5.4.1 NEW: GUI stop/reap tests with a fake engine - no real webcam.
+# ----------------------------------------------------------------------
+print("--- GUI HAND ENGINE REAP + STOP RESET (v5.4.1 regression) ---")
+
+
+class FakeEngine:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self._running = False
+        self.started = 0
+        self.stopped = 0
+        self.modes = []
+
+    def is_running(self):
+        return self._running
+
+    def start(self):
+        self._running = True
+        self.started += 1
+
+    def stop(self):
+        self._running = False
+        self.stopped += 1
+
+    def set_mode(self, m):
+        self.modes.append(m)
+
+
+class StaleEngine:
+    """An engine whose thread died without sending a 'stopped' event."""
+
+    def __init__(self):
+        self.stopped = 0
+
+    def is_running(self):
+        return False
+
+    def stop(self):
+        self.stopped += 1
+
+
+old_factory = va.HandCursorEngine
+created = []
+
+
+def counted_factory(**kwargs):
+    eng = FakeEngine(**kwargs)
+    created.append(eng)
+    return eng
+
+
+va.HandCursorEngine = counted_factory
+
+# The trainer test above replaced the instance method with a no-op lambda;
+# restore the real bound method so this test actually exercises the logic.
+app.start_hand_cursor = va.VoiceControlApp.start_hand_cursor.__get__(
+    app, va.VoiceControlApp)
+
+stale = StaleEngine()
+app._hand_engine = stale
+app.start_hand_cursor()               # must reap the stale engine first
+assert stale.stopped == 1, "stale engine was not stopped before restart"
+neweng = created[-1]
+assert app._hand_engine is neweng, "a fresh engine was not created"
+assert neweng.started == 1, "fresh engine was not started"
+assert neweng.kwargs["camera_index"] == int(app.camera_var.get())
+
+app.start_hand_cursor()               # already running -> no-op
+assert len(created) == 1, "duplicate engine started"
+assert neweng.started == 1
+
+app.stop_hand_cursor()
+assert neweng.stopped == 1, "running engine was not stopped"
+assert app._hand_engine is None, "engine reference was not cleared"
+root.update()                         # run the after() UI reset callback
+assert str(app.hand_stop_btn["state"]) == "disabled"
+assert app.hand_led.cget("bg") == "#3a3f45"
+
+app.start_hand_cursor = lambda: None  # prevent any further GUI engine starts
+va.HandCursorEngine = old_factory
+app._hand_engine = None
+print("GUI engine reap + stop reset OK")
+
+# ----------------------------------------------------------------------
+# v5.4.1 NEW: real webcam lifecycle (skips cleanly when no camera exists)
+# ----------------------------------------------------------------------
+print("--- REAL WEBCAM START/STOP/RESTART (v5.4.1 regression) ---")
+cam_index = available_cameras(limit=2)
+if not cam_index:
+    print("No webcam available - SKIPPING real-camera lifecycle test")
+else:
+    index = cam_index[0]
+
+    def camera_reopenable(i):
+        import cv2
+        cap = cv2.VideoCapture(i)
+        ok = cap.isOpened()
+        if ok:
+            cap.release()
+        return ok
+
+    cam_events = []
+
+    def cam_capture(kind, data):
+        cam_events.append((kind, data))
+
+    camp = HandCursorEngine(camera_index=index, emit_preview=False,
+                            on_event=cam_capture)
+    camp.start()
+    deadline = time.time() + 45
+    while time.time() < deadline:
+        if any(k == "started" for k, _ in cam_events):
+            break
+        if any(k == "error" for k, _ in cam_events):
+            break
+        time.sleep(0.05)
+    assert any(k == "started" for k, _ in cam_events), (
+        "engine did not start on the real camera; events=%s"
+        % [(k, str(d)[:40]) for k, d in cam_events[:4]])
+
+    time.sleep(1.0)
+    assert camp.is_running(), "engine stopped unexpectedly while running"
+
+    t0 = time.time()
+    camp.stop()
+    dt = time.time() - t0
+    print(f"  start ok; stop() returned in {dt:.2f}s")
+    assert dt < 3.0, f"stop() took too long ({dt:.2f}s)"
+    assert not camp.is_running(), "engine still running after stop()"
+    assert camp._cap is None, "camera capture not released after stop()"
+    assert camp._thread is None, "thread reference not cleared after stop()"
+    assert any(k == "stopped" for k, _ in cam_events), "no stopped event"
+    assert "error" not in [k for k, _ in cam_events], "unexpected error"
+
+    time.sleep(0.3)
+    assert camera_reopenable(index), (
+        "webcam still locked after stop - OS never got the device back")
+
+    camp.start()                       # restart the same engine object
+    started_count = sum(1 for k, _ in cam_events if k == "started")
+    deadline = time.time() + 30
+    while time.time() < deadline and \
+            sum(1 for k, _ in cam_events if k == "started") == started_count:
+        time.sleep(0.05)
+    assert camp.is_running(), "engine did not restart after stop()"
+    time.sleep(0.5)
+    camp.stop()
+    assert camp._cap is None
+    time.sleep(0.3)
+    assert camera_reopenable(index), "webcam still locked after 2nd stop"
+    print("  start->stop->start->stop lifecycle OK")
+print("Real webcam lifecycle OK")
+
+# ----------------------------------------------------------------------
+# Cleanup: restore config, real shutdown.
+# ----------------------------------------------------------------------
 app.config["macro_mode"] = bool(orig_macro_mode)
 app.config["touchpad_mode"] = bool(orig_touchpad_mode)
+app.config["hand_mode"] = orig_hand_mode
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.4 TESTS PASSED ===")
+print("=== ALL v5.4.1 TESTS PASSED ===")
 app.on_close()  # real shutdown: stops tray, hotkey, threads

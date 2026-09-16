@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v5.4)
+VOICE CONTROL - QUICK START GUIDE  (v5.4.1)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -352,8 +352,14 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
 
   * Hand cursor: "hand: error" or "camera could not be opened"
       -> Another app (Zoom, Chrome) is using the webcam. Close it.
+      -> Only ONE copy of Voice Control should run at a time - a second
+         copy cannot open the webcam while the first holds it. Quit the
+         first from its tray icon menu first.
       -> Try a different "Cam:" number and press START.
       -> Allow Camera access: Settings -> Privacy & security -> Camera.
+      -> STOP now releases the webcam reliably (v5.4.1): if the camera
+         LED stays on after STOP, press START once - a stale copy of the
+         engine is automatically reaped before a fresh one is opened.
 
   * Cursor does not move / is very jumpy
       -> Stay arm's length from the camera, hand silhouette clear of the
@@ -385,7 +391,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
-  test_v54.py         Dev-only smoke test suite for the v5.4 features
+  test_v55.py         Dev-only smoke test suite (v5.4.1 features + regressions)
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!

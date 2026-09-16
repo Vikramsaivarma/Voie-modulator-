@@ -30,6 +30,18 @@
  scroll, 3 fingers = right click, fist = drag), and the reach gate is
  skipped because a trackpad must respond whenever the hand is in frame.
 
+ CAMERA LIFECYCLE FIXES (v1.7.1)
+ --------------------------------
+ * stop() now force-releases the capture object, so the webcam LED turns
+   off even if a read is blocked, and the engine can be restarted instead
+   of leaving a ghost thread holding the device.
+ * start() reaps any still-alive engine thread before opening the camera
+   again, so two threads never lock the same webcam.
+ * _run() releases the capture when the camera fails to open, tolerates a
+   few transient bad reads before bailing out, and stops promptly.
+ * The camera is requested at 640x480 with a 1-frame buffer for lower
+   latency; inference still runs on a 320-wide downscale.
+
  ANTI-ACCIDENT DESIGN (v1.2)
  ---------------------------
  A pose is only trusted after it has been observed for several consecutive
@@ -51,7 +63,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.7.0
+ VERSION   : 1.7.1
 ==============================================================================
 """
 
@@ -127,6 +139,10 @@ MAX_FPS      = 30
 PREVIEW_FPS  = 15
 # State-line updates per second shown in the GUI status label.
 STATE_FPS    = 8
+# Consecutive camera read failures before the engine gives up and reports
+# an error (a single glitch should not kill the session, but a dead/busy
+# webcam must be detected quickly and the device released).
+BAD_READ_LIMIT = 30
 
 # ----------------------------------------------------------------------
 # DRAW-MACRO mode ("draw a shape in the air to trigger an action").
@@ -269,14 +285,19 @@ def available_cameras(limit=6):
         return []
     found = []
     for index in range(limit):
+        cap = None
         try:
             cap = cv2.VideoCapture(index)
-            ok = cap.isOpened()
-            cap.release()
-            if ok:
+            if cap.isOpened():
                 found.append(index)
         except Exception:
             continue
+        finally:
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
     return found
 
 
@@ -313,6 +334,8 @@ class HandCursorEngine:
         self._running = threading.Event()
         self._thread = None
         self._cap = None
+        self._cap_lock = threading.Lock()  # protects `_cap` across threads
+        self._bad_reads = 0               # consecutive failed camera reads
 
         # Per-frame gesture state.
         self._cursor = None          # last EMA-smoothed pointer position
@@ -350,19 +373,50 @@ class HandCursorEngine:
     # Public control API
     # ------------------------------------------------------------------
     def start(self):
-        """Start the capture + inference loop in a daemon thread."""
-        if self.is_running():
-            return
+        """Start the capture + inference loop in a daemon thread.
+
+        If a previous engine thread is still alive (a stop that never fully
+        finished), it is stopped and reaped first so two threads never open
+        the same webcam together.
+        """
+        old = self._thread
+        if old is not None:
+            if old.is_alive():
+                self.stop()
+                if old.is_alive():
+                    raise RuntimeError(
+                        "The previous hand-cursor thread did not exit; "
+                        "the camera may still be busy.")
+            self._thread = None
         self._running.set()
         self._thread = threading.Thread(
             target=self._run, name="hand-cursor", daemon=True)
         self._thread.start()
 
     def stop(self):
-        """Stop the loop, release the camera and the mouse button."""
+        """Stop the loop and hand the webcam back to the OS.
+
+        The capture is force-released so the camera LED turns off even when
+        one thread is blocked inside a read, and every thread reference is
+        cleared so the engine can be restarted cleanly afterwards.
+        """
         self._running.clear()
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
+        self._release_camera()
+        thread, self._thread = self._thread, None
+        if thread is not None:
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                # Rearmed backgrounds can leave a device open while a read is
+                # blocked; give the loop one more chance, then release again
+                # so the pending read fails and the thread unwinds.
+                try:
+                    time.sleep(0.05)
+                except Exception:
+                    pass
+                self._release_camera()
+                thread.join(timeout=1.0)
+        self._release_button()
+        self._release_button(right=True)
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -431,6 +485,21 @@ class HandCursorEngine:
         if self.on_event is not None:
             try:
                 self.on_event(kind, data)
+            except Exception:
+                pass
+
+    def _release_camera(self):
+        """Close the capture object (thread-safe, idempotent).
+
+        Typically called from `stop()` so the webcam is returned to the OS
+        even if the engine thread is blocked on a read.
+        """
+        with self._cap_lock:
+            cap = self._cap
+            self._cap = None
+        if cap is not None:
+            try:
+                cap.release()
             except Exception:
                 pass
 
@@ -765,7 +834,7 @@ class HandCursorEngine:
             self._macro_last_ts = now
             self._macro_commit_ts = now
         elif self._macro_last_pt is not None:
-            # Finger held still — check dwell to commit.
+            # Finger held still â€” check dwell to commit.
             if (now - self._macro_commit_ts) >= MACRO_COMMIT_TIME:
                 self._finalize_macro()
 
@@ -773,7 +842,7 @@ class HandCursorEngine:
         if len(self._macro_pts) >= 500:
             self._finalize_macro()
 
-        self._emit_state(label, fingers)
+        self._emit_state("DRAW", None)
         return label, fingers
 
     def _finalize_macro(self):
@@ -887,12 +956,26 @@ class HandCursorEngine:
     # ------------------------------------------------------------------
     def _run(self):
         cap = cv2.VideoCapture(self.camera_index)
+        # Lower the acquisition latency: 640x480 is enough for gesture
+        # tracking and the inference stage already downscales to 320 wide.
+        for prop, value in ((cv2.CAP_PROP_FRAME_WIDTH, 640),
+                            (cv2.CAP_PROP_FRAME_HEIGHT, 480),
+                            (cv2.CAP_PROP_BUFFERSIZE, 1)):
+            try:
+                cap.set(prop, value)
+            except Exception:
+                pass
         if not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
             self._send("error",
                        f"Camera {self.camera_index} could not be opened. "
                        "Check the webcam and Cam selector.")
             return
-        self._cap = cap
+        with self._cap_lock:
+            self._cap = cap
         try:
             self._screen = tuple(int(v) for v in pyautogui.size())
         except Exception:
@@ -915,9 +998,22 @@ class HandCursorEngine:
             while self._running.is_set():
                 started = time.time()
 
-                ok, frame = cap.read()
+                try:
+                    ok, frame = cap.read()
+                except Exception as exc:
+                    self._send("error", f"Camera read error: {exc}")
+                    break
                 if not ok:
-                    self._send("error", "The webcam stopped returning frames.")
+                    # A single glitch is tolerated; a dead or busy webcam
+                    # shows up as many consecutive failures and we bail out.
+                    self._bad_reads += 1
+                    if self._bad_reads >= BAD_READ_LIMIT:
+                        self._send("error",
+                                   "The webcam stopped returning frames.")
+                        break
+                    continue
+                self._bad_reads = 0
+                if not self._running.is_set():
                     break
 
                 # Mirror the feed so it feels like a mirror (natural).
@@ -974,9 +1070,12 @@ class HandCursorEngine:
                 hands.close()
             except Exception:
                 pass
+            with self._cap_lock:
+                if self._cap is cap:
+                    self._cap = None
             try:
                 cap.release()
             except Exception:
                 pass
-            self._cap = None
+            self._bad_reads = 0
             self._send("stopped", "Hand cursor stopped.")
