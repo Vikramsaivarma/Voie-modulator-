@@ -65,6 +65,11 @@
    "stop hand cursor" always resets the UI even if the engine died without
    saying goodbye. Restarting after a stop no longer fails because the old
    capture is still held.
+ * THREAD-MARSHALLING HARDENING (v5.5.0): every tkinter touch now happens
+   on the GUI thread. Voice/tray/hotkey/engine threads marshal their UI
+   work through the event queue (_gui_call), _append_log is worker-safe,
+   and hand-engine events are tagged with an epoch so a stale "started /
+   stopped" event from a previous engine instance can never flip the UI.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -115,7 +120,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.4.1
+VERSION   : 5.5.0
 ================================================================================
 """
 
@@ -548,6 +553,10 @@ class VoiceControlApp:
 
         # Thread-safe message queue between worker and GUI threads.
         self._queue = queue.Queue()
+        # Identify the GUI thread so helpers can marshal cross-thread calls.
+        self._gui_thread_id = threading.get_ident()
+        self._hand_epoch = 0      # bumped on each engine start to filter
+                                  # stale events from a previous engine instance
 
         # Dedicated TTS thread owns a single persistent pyttsx3 engine, so
         # speech starts instantly instead of re-initialising SAPI5 each time.
@@ -1196,9 +1205,31 @@ text="Say: Open <app> | Type <text> | Search <query> | "
               "threshold" | "autoselect" | "autodone" | "testdone" |
               "hand_state" | "hand_preview" | "hand_size" | "started" |
               "stopped" | "error" | "beep" | "tts_voices" |
-              "quit"
+              "gui" | "quit"
         """
         self._queue.put((kind, data))
+
+    def _on_gui_thread(self):
+        """True when running on the main thread that owns the Tk widgets."""
+        return threading.get_ident() == self._gui_thread_id
+
+    def _gui_call(self, fn, *args):
+        """Run fn(*args) on the GUI thread; worker-safe.
+
+        When called from a worker thread the call is queued as a "gui"
+        event and executed by the poller on the main thread, which makes
+        every tkinter-touching method invoked from handle_command /
+        tray/engine threads thread-safe.
+        """
+        if self._on_gui_thread():
+            try:
+                fn(*args)
+            except tk.TclError:
+                pass  # window is closing - drop silently
+            except Exception as exc:
+                self._append_log(f"[!] GUI call error: {exc}")
+            return
+        self._queue.put(("gui", (fn, args)))
 
     def _poll_queue(self):
         """Drain the queue and apply updates to the GUI."""
@@ -1257,6 +1288,9 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                     self._on_macro(data)
                 elif kind == "tts_voices":
                     self._populate_voice_menu(data)
+                elif kind == "gui":
+                    fn, args = data
+                    fn(*args)
                 elif kind == "quit":
                     self.on_close()
                     return
@@ -1516,7 +1550,14 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         self._post("status", "Listening...")
 
     def _append_log(self, line):
-        """Insert a timestamped line (or multi-line block) into the log."""
+        """Insert a timestamped line (or multi-line block) into the log.
+
+        Worker-safe: off-thread callers are marshalled onto the GUI thread
+        so log_text is only ever touched by the thread that owns it.
+        """
+        if not self._on_gui_thread():
+            self._queue.put(("gui", (self._append_log, (line,))))
+            return
         timestamp = time.strftime("%H:%M:%S")
         body = line if isinstance(line, str) else str(line)
 
@@ -1999,11 +2040,11 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         if re.search(r"\b(hand cursor|hand mode|hand control|air cursor|"
                      r"air mouse)\b", lowered):
             if re.search(r"\b(start|turn on|enable|activate|begin)\b", lowered):
-                self.start_hand_cursor()
+                self._gui_call(self.start_hand_cursor)
                 self._post("log", "[i] Starting hand cursor.")
                 self._speak("Starting hand cursor.")
             else:
-                self.stop_hand_cursor()
+                self._gui_call(self.stop_hand_cursor)
                 self._post("log", "[i] Stopping hand cursor.")
                 self._speak("Stopping hand cursor.")
             return
@@ -2013,10 +2054,10 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                      lowered) and \
            re.search(r"\b(gesture|gestures|hand)\b", lowered):
             if re.search(r"\b(stop|close|quit|exit|end)\b", lowered):
-                self._close_trainer()
+                self._gui_call(self._close_trainer)
                 self._speak("Closing the gesture trainer.")
             else:
-                self._open_trainer()
+                self._gui_call(self._open_trainer)
                 self._post("log", "[i] Opening gesture trainer.")
                 self._speak("Opening the gesture trainer.")
             return
@@ -2032,10 +2073,10 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                             lowered)
         if mac_on or mac_off:
             if mac_on and not mac_off:
-                self._toggle_macro_mode(True)
+                self._gui_call(self._toggle_macro_mode, True)
                 self._speak("Macro drawing mode turned on.")
             else:
-                self._toggle_macro_mode(False)
+                self._gui_call(self._toggle_macro_mode, False)
                 self._speak("Macro drawing mode turned off.")
             return
 
@@ -2046,11 +2087,11 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             re.search(r"\b(off|stop|disable|exit|end)\b", lowered)
         if tp_on or tp_off:
             if tp_on and not tp_off:
-                self._toggle_touchpad(True)
+                self._gui_call(self._toggle_touchpad, True)
                 self._speak("Touchpad mode turned on. Move your hand like "
                             "a mouse.")
             else:
-                self._toggle_touchpad(False)
+                self._gui_call(self._toggle_touchpad, False)
                 self._speak("Touchpad mode turned off.")
             return
 
@@ -2196,7 +2237,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         if "minimize" in lowered or "minimise" in lowered:
             if re.search(r"\b(minimize|minimise)\b.*\b(tray|to tray)\b",
                          lowered):
-                self.root.withdraw()
+                self._gui_call(self.root.withdraw)
                 self._post("log", "[i] Minimized to system tray.")
                 self._speak("Minimized to the system tray.")
                 return
@@ -2207,7 +2248,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         # Restore the window (e.g. from tray) - also covers "show window".
         if re.search(r"\b(show|restore|bring (back|up))\b.*\b(window|app|"
                      r"tray)\b", lowered):
-            self._restore_window()
+            self._gui_call(self._restore_window)
             self._speak("Here I am.")
             return
 
@@ -2251,12 +2292,10 @@ text="Say: Open <app> | Type <text> | Search <query> | "
            re.search(r"\b(auto ?start|run on login|start on boot)\b",
                      lowered):
             if re.search(r"\b(off|disable|don't|do not|no)\b", lowered):
-                self._set_autostart(False)
-                self.autostart_var.set(False)
+                self._gui_call(self._apply_autostart, False)
                 self._speak("Auto start is now off.")
             else:
-                self._set_autostart(True)
-                self.autostart_var.set(True)
+                self._gui_call(self._apply_autostart, True)
                 self._speak("This app will start automatically when you "
                             "sign in.")
             return
@@ -2777,6 +2816,18 @@ text="Say: Open <app> | Type <text> | Search <query> | "
     REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
     REG_NAME = "VoiceControlApp"
 
+    def _apply_autostart(self, enable):
+        """Set the registry autostart entry and mirror it in the checkbox.
+
+        GUI thread only (invoked via _gui_call from worker contexts) so the
+        tkinter variable is always touched by its owning thread.
+        """
+        self._set_autostart(enable)
+        try:
+            self.autostart_var.set(bool(enable))
+        except tk.TclError:
+            pass
+
     def _set_autostart(self, enable):
         """Add or remove a HKCU Run key so the app starts on login."""
         try:
@@ -2990,14 +3041,20 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             return
         arm = self.config.get("hand_arm_size")
         disarm = self.config.get("hand_disarm_size")
+        # New engine identity: events/frames from older instances are dropped
+        # by _hand_event/_hand_preview so a late event can never flip the UI.
+        self._hand_epoch += 1
+        cur_epoch = self._hand_epoch
         try:
             engine = HandCursorEngine(
                 camera_index=int(self.config.get("camera_index", 0)),
                 sensitivity=float(self.config.get("hand_sensitivity", 1.0)),
                 scroll_speed=float(self.config.get("hand_scroll_speed", 1.0)),
                 emit_preview=bool(self.preview_var.get() and PIL_OK),
-                on_event=self._hand_event,
-                on_preview=self._hand_preview,
+                on_event=lambda kind, data, _e=cur_epoch:
+                    self._hand_event(kind, data, _e),
+                on_preview=lambda frame, _e=cur_epoch:
+                    self._hand_preview(frame, _e),
                 arm_size=arm if arm else None,
                 disarm_size=disarm if disarm else None,
             )
@@ -3043,12 +3100,25 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         except tk.TclError:
             pass
 
-    def _hand_event(self, kind, data):
-        """Callback from the engine thread -> forward into the GUI queue."""
+    def _hand_event(self, kind, data, epoch):
+        """Callback from the engine thread -> forward into the GUI queue.
+
+        Events tagged with a stale engine epoch (a previous engine that has
+        been stopped and replaced) are dropped immediately, so a late
+        "stopped"/"started" event can never flip the UI for the wrong
+        engine.
+        """
+        if epoch != self._hand_epoch:
+            return
         self._post(kind, data)
 
-    def _hand_preview(self, frame):
-        """Callback from the engine thread -> queue the camera frame."""
+    def _hand_preview(self, frame, epoch):
+        """Callback from the engine thread -> queue the camera frame.
+
+        Frames from a previous engine instance are dropped the same way.
+        """
+        if epoch != self._hand_epoch:
+            return
         self._post("hand_preview", frame)
 
     def _set_hand_ui(self, running, text):
@@ -3397,8 +3467,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
     def _hotkey_restore(self):
         """Global-hotkey callback (keyboard thread) - hop to the GUI."""
         try:
-            self.root.after(0, self._restore_window)
-        except tk.TclError:
+            self._queue.put(("gui", (self._restore_window, ())))
+        except Exception:
             pass
 
     def _restore_window(self):
@@ -3414,7 +3484,14 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             pass
 
     def _tray_toggle(self, icon=None, item=None):
-        """Tray menu: show/hide the main window."""
+        """Tray menu: show/hide the main window (runs on pystray thread)."""
+        try:
+            self._queue.put(("gui", (self._tray_toggle_gui, ())))
+        except Exception:
+            pass
+
+    def _tray_toggle_gui(self):
+        """Apply the tray show/hide toggle on the GUI thread."""
         try:
             if self.root.state() == "withdrawn":
                 self._restore_window()

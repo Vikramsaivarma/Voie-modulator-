@@ -5,7 +5,7 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v5.4.1 works end-to-end (voice, waveform UI, timers, clipboard history,
+STATUS: v5.5.0 works end-to-end (voice, waveform UI, timers, clipboard history,
 screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
 log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
 live tuning, chained commands, wake word aliases, timer toast popups,
@@ -15,9 +15,14 @@ gestures that trigger actions, and a touchpad/relative-mouse hand mode).
 v5.4.1 fixed the webcam lifecycle: STOP now force-releases the camera so the
 LED really goes out, a stale/ghost engine thread is reaped before a fresh
 START, and the stop UI always resets even if the engine died silently.
+v5.5.0 added thread-safety hardening (spiral 2): every tkinter touch now
+happens on the GUI thread. Voice, tray and hotkey workers marshal their UI
+work through the event queue (_gui_call), _append_log is worker-safe, and
+hand-engine events are epoch-tagged so stale events from an old engine
+instance can never flip the UI. hand_cursor.py itself is on v1.8.0.
 
-------------------------------------------------------------------------------
-1) CURRENT ARCHITECTURE (v5.4)
+-------------------------------------------------------------------------------
+1) CURRENT ARCHITECTURE (v5.5)
 -------------------------------------------------------------------------------
 - voice_app.py   ~3500 lines : tkinter GUI + controller.
   Threads:  "stt"    (speech -> text, Google Web API)
@@ -44,6 +49,11 @@ Command branches: app launch, browser, window, system keys, volume,
    off even on a blocked read), start() reaps a still-alive engine thread,
    _run() releases on open failure + tolerates transient bad reads, latency
    dropped (640x480 + 1-frame buffer, inference still 320-wide).
+   v5.5: GUI THREAD-MARSHALLING - _gui_call() queues worker->GUI work onto
+   the event queue (the poller executes it on the owning thread), so voice
+   commands, tray and hotkey callbacks can no longer touch Tk from a worker
+   thread; _append_log is thread-safe; hand-engine callbacks carry an epoch
+   so events from an old engine instance are dropped before reaching the UI.
    v5.4: TOUCHPAD - TOUCHPAD button (or voice "touchpad mode") switches the
    engine to a RELATIVE mouse: the pointer follows accumulated hand-center
    deltas, like a laptop trackpad, so it never teleports and feels like a
@@ -149,6 +159,6 @@ PHASE D - GESTURE X / PRODUCTISATION
 4) NEXT SHIPMENT (playbook for continuing)
   1. Phase D: two-hand support (primary pointer + modifier hand).
   2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
-  3. Run full smoke suite (py_compile + test_v55.py), update QUICK_START.txt
+  3. Run full smoke suite (py_compile + test_v56.py), update QUICK_START.txt
      + this PLAN, then git add -A && commit && push to origin/main.
 ===============================================================================

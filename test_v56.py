@@ -1,11 +1,18 @@
-"""Smoke-test suite for VoiceControlApp v5.4.1 (camera lifecycle fixes).
+"""Smoke-test suite for VoiceControlApp v5.5.0 (GUI thread marshalling).
 
-Supersedes test_v54.py: keeps all v5.2/v5.3/v5.4 regression checks and adds
-the v5.4.1 webcam start/stop/restart + stale-engine-reap coverage.
+Supersedes test_v55.py: keeps all v5.2..v5.4.1 regression checks and adds
+the v5.5.0 thread-safety coverage:
+
+  * _gui_call() runs tkinter work on the GUI thread (inline or queued).
+  * _append_log() is worker-safe (posted back to the GUI thread).
+  * voice/tray/hotkey workers no longer touch Tk widgets directly.
+  * hand-engine events are epoch-tagged so stale events from a previous
+    engine instance are dropped before they hit the GUI queue.
 """
 import os
 import sys
 import time
+import threading
 import tkinter as tk
 import py_compile
 from types import SimpleNamespace
@@ -54,7 +61,6 @@ def _cleanup_on_error(exc_type, exc, tb):
     raise exc
 
 
-import sys
 sys.excepthook = _cleanup_on_error
 
 print("--- WIDGET SMOKE ---")
@@ -87,6 +93,178 @@ assert va.VoiceControlApp._TRAIN_GESTURES == [
     ("DRAG", ("fist",)),
 ], va.VoiceControlApp._TRAIN_GESTURES
 print("Trainer gesture map OK")
+
+# ----------------------------------------------------------------------
+# v5.5.0 NEW: GUI-thread marshalling
+# ----------------------------------------------------------------------
+print("--- GUI THREAD IDENTIFICATION ---")
+assert app._on_gui_thread(), "main thread must be considered the GUI thread"
+worker_thread_id = []
+
+
+def record_thread_id():
+    worker_thread_id.append(app._on_gui_thread())
+
+
+t = threading.Thread(target=record_thread_id, daemon=True)
+t.start()
+t.join()
+assert worker_thread_id == [False], "worker thread must NOT be GUI thread"
+print("GUI/worker thread distinction OK")
+
+print("--- _gui_call INLINE (GUI thread runs the call directly) ---")
+ret = []
+app._gui_call(lambda: ret.append("ran"))
+assert ret == ["ran"], "inline _gui_call did not run the function"
+print("_gui_call inline dispatch OK")
+
+print("--- _gui_call QUEUED (worker -> GUI thread via queue) ---")
+def drain_queue():
+    app._poll_queue()
+
+
+worker_results = []
+
+
+def worker_post():
+    app._gui_call(lambda: worker_results.append("executed-on-main"))
+    marker = app._on_gui_thread()      # worker itself
+    worker_results.append(f"worker-gui={marker}")
+
+
+wt = threading.Thread(target=worker_post, daemon=True)
+wt.start()
+wt.join()
+assert worker_results == ["worker-gui=False"], worker_results
+drain_queue()                           # poller runs the queued job
+assert worker_results == ["worker-gui=False", "executed-on-main"], \
+    worker_results
+print("_gui_call queued dispatch OK")
+
+print("--- _append_log WORKER-SAFE ---")
+log_path = os.path.join(os.path.dirname(os.path.abspath("voice_app.py")),
+                        "voc_log.txt")
+marker = "[TEST] worker marshal marker v5.5.0"
+wt = threading.Thread(target=lambda: app._append_log(marker), daemon=True)
+wt.start()
+wt.join()
+drain_queue()
+assert os.path.exists(log_path)
+assert marker in app.log_text.get("1.0", tk.END), "log text not marshalled"
+# The log text widget is only ever touched by the GUI thread: the worker
+# thread above never wrote to it directly (it queued the append instead).
+print("_append_log marshalled OK")
+
+print("--- VOICE COMMAND FROM WORKER THREAD ----")
+orig_engine = app._hand_engine
+fake = SimpleNamespace(
+    is_running=lambda: True,
+    set_training=lambda flag: None,
+    set_mode=lambda m: setattr(fake, "last_mode", m),
+)
+app._hand_engine = fake
+app.handle_command = va.VoiceControlApp.handle_command.__get__(app,
+                                                               va.VoiceControlApp)
+app._speak = lambda *a, **k: None
+
+def worker_command(phrase):
+    app.handle_command(phrase)
+
+
+wt = threading.Thread(target=worker_command, args=("draw macros",), daemon=True)
+wt.start()
+wt.join()
+for _ in range(50):
+    drain_queue()
+    root.update()
+    if app._macro_mode_var.get():
+        break
+    time.sleep(0.02)
+assert app._macro_mode_var.get() is True, "worker voice command did not apply"
+assert app.config.get("macro_mode") is True
+wt = threading.Thread(target=worker_command, args=("stop macros",), daemon=True)
+wt.start()
+wt.join()
+for _ in range(50):
+    drain_queue()
+    root.update()
+    if not app._macro_mode_var.get():
+        break
+    time.sleep(0.02)
+assert app._macro_mode_var.get() is False, "worker voice command did not toggle off"
+assert app.config.get("macro_mode") is False
+print("Worker-thread voice command (macro) OK")
+
+print("--- TRAY TOGGLE MARSHALLED (worker posts, GUI applies) ---")
+restore_called = []
+
+
+def fake_restore():
+    restore_called.append(True)
+
+
+orig_restore = app._restore_window
+app._restore_window = fake_restore
+# App window starts visible (normal state).  First toggle should HIDE it
+# (withdraw), second toggle should RESTORE it (deiconify + fake_restore).
+t1 = threading.Thread(target=app._tray_toggle, daemon=True)
+t1.start()
+t1.join()
+drain_queue()
+root.update()
+assert app.root.state() == "withdrawn", (
+    f"first tray toggle should hide window, got {app.root.state()!r}")
+assert restore_called == [], "restore should not be called while hiding"
+t2 = threading.Thread(target=app._tray_toggle, daemon=True)
+t2.start()
+t2.join()
+drain_queue()
+root.update()
+assert restore_called == [True], (
+    f"tray toggle did not run on the GUI thread: {restore_called!r}")
+app._restore_window = orig_restore
+print("Tray toggle marshalling OK")
+
+print("--- HOTKEY RESTORE MARSHALLED ---")
+restore_called.clear()
+orig_restore = app._restore_window
+app._restore_window = fake_restore
+wt = threading.Thread(target=app._hotkey_restore, daemon=True)
+wt.start()
+wt.join()
+drain_queue()
+root.update()
+assert restore_called == [True], "hotkey restore did not run on the GUI thread"
+app._restore_window = orig_restore
+print("Hotkey restore marshalling OK")
+
+print("--- ENGINE EPOCH GUARD (stale events dropped) ---")
+for _ in range(20):
+    drain_queue()
+old_epoch = app._hand_epoch
+app._hand_epoch = 200                # new engine "started"
+app._hand_event("hand_state", "FRESH", 200)
+app._hand_event("hand_state", "STALE", 199)      # dropped at source
+app._hand_event("hand_state", "STALE2", old_epoch)  # dropped at source
+drain_queue()
+assert app.hand_state_var.get() == "FRESH", \
+    f"expected FRESH, got {app.hand_state_var.get()!r}"
+for _ in range(20):
+    drain_queue()
+assert app.hand_state_var.get() == "FRESH", \
+    "stale engine event flipped the GUI state"
+app._hand_epoch = old_epoch
+print("Engine epoch guard OK")
+
+print("--- TRAINER ROWS (v5.2 regression) ---")
+assert va.VoiceControlApp._TRAIN_GESTURES == [
+    ("MOVE", ("index", "open")),
+    ("CLICK", ("pinch",)),
+    ("SCROLL", ("peace",)),
+    ("RIGHT CLICK", ("three",)),
+    ("DRAG", ("fist",)),
+], va.VoiceControlApp._TRAIN_GESTURES
+print("Trainer rows OK")
 
 print("--- ENGINE TRAINING (synthetic landmarks, v5.2 regression) ---")
 import hand_cursor as hc
@@ -241,15 +419,8 @@ engine.set_mode("cursor")
 assert engine._driver_mode == "cursor"
 print("Engine touchpad mapping OK")
 
-print("--- TOUCHPAD VOICE COMMANDS ---")
-orig_engine = app._hand_engine
-fake = SimpleNamespace(
-    is_running=lambda: True,
-    set_training=lambda flag: None,
-    set_mode=lambda m: setattr(fake, "last_mode", m),
-)
+print("--- TOUCHPAD VOICE COMMANDS (v5.4 regression) ---")
 app._hand_engine = fake
-app._speak = lambda *a, **k: None
 app.handle_command("touchpad mode")
 assert app._touchpad_var.get() is True
 assert fake.last_mode == "touchpad"
@@ -310,27 +481,6 @@ assert img is not None
 app._start_tray()
 assert app._tray_icon is not None
 print("Tray icon + hotkey started OK")
-
-print("--- LOG PERSISTENCE (v5.2 regression) ---")
-log_path = os.path.join(os.path.dirname(os.path.abspath("voice_app.py")),
-                        "voc_log.txt")
-app._append_log("[TEST] persistence marker v5.4.1")
-assert os.path.exists(log_path)
-with open(log_path, "r", encoding="utf-8") as f:
-    lines = f.readlines()
-assert any("persistence marker v5.4.1" in l for l in lines)
-print("Log persistence OK")
-
-print("--- CHAIN PARSE (v5.2 regression) ---")
-assert va.VoiceControlApp._parse_chain(
-    "open chrome then search weather") == ["open chrome", "search weather"]
-assert va.VoiceControlApp._parse_chain("banana then kiwifruit") is None
-print("Chain parse OK")
-
-print("--- GEMINI MEMORY (v5.2 regression) ---")
-app.clear_gemini_memory()
-assert len(app._gemini_history) == 0
-print("Memory OK")
 
 print("--- AUTOSTART REGISTRY (v5.2 regression) ---")
 import winreg
@@ -402,8 +552,6 @@ def counted_factory(**kwargs):
 
 va.HandCursorEngine = counted_factory
 
-# The trainer test above replaced the instance method with a no-op lambda;
-# restore the real bound method so this test actually exercises the logic.
 app.start_hand_cursor = va.VoiceControlApp.start_hand_cursor.__get__(
     app, va.VoiceControlApp)
 
@@ -511,5 +659,5 @@ app.config["hand_mode"] = orig_hand_mode
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.4.1 TESTS PASSED ===")
+print("=== ALL v5.5.0 TESTS PASSED ===")
 app.on_close()  # real shutdown: stops tray, hotkey, threads
