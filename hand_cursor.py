@@ -42,6 +42,26 @@
  * The camera is requested at 640x480 with a 1-frame buffer for lower
    latency; inference still runs on a 320-wide downscale.
 
+ GESTURE-SAFETY (v1.8)
+ ---------------------
+ * The reach-gate disarm branch and the hand-loss branch now reset the
+   gesture state (`_mode`, `_candidate`, `_pinch_engaged`), so a reappearing
+   hand is re-verified for `STABLE_FRAMES` before it can click again - no
+   phantom click on the first un-debounced frame after re-arming.
+ * `_press_button()` refuses to press while the loop is stopped or the
+   gesture trainer is active, so a mid-frame stop/training switch can never
+   leave a mouse button held.
+ * Macro mode no longer echoes a bogus ``('macro', None)`` every second:
+   after a stroke is committed a short cooldown window opens and the last
+   fingertip position is kept, so a resting hand cannot re-trigger the
+   dwell finalizer, and interrupted strokes are discarded on disarm.
+ * `start()`/`stop()` are serialised on a lifecycle lock, so a concurrent
+   stop cannot race the thread creation, and a zombie thread that survives
+   a stop keeps its reference so the next `start()` always reaps it.
+ * Every `_run()` exit path (camera open failure, model load failure, read
+   failure, stop) now reaches a single `finally` that releases the capture
+   and emits ``'stopped'`` - the app can never be stuck in "starting".
+
  ANTI-ACCIDENT DESIGN (v1.2)
  ---------------------------
  A pose is only trusted after it has been observed for several consecutive
@@ -63,7 +83,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.7.1
+ VERSION   : 1.8.0
 ==============================================================================
 """
 
@@ -114,7 +134,6 @@ FINGER_NAMES = ("T", "I", "M", "R", "P")
 SCROLL_GAIN  = 0.05
 # Pinch recognition with HYSTERESIS: it must get closer than PINCH_ENGAGE before
 # a click/drag engages, and may stay engaged until it opens wider than RELEASE.
-# click/drag engages, and may stay engaged until it opens wider than RELEASE.
 # This prevents a resting thumb+index pair from flickering into a click.
 PINCH_ENGAGE = 0.28
 PINCH_RELEASE = 0.55
@@ -335,6 +354,7 @@ class HandCursorEngine:
         self._thread = None
         self._cap = None
         self._cap_lock = threading.Lock()  # protects `_cap` across threads
+        self._lifecycle_lock = threading.Lock()  # serialises start()/stop()
         self._bad_reads = 0               # consecutive failed camera reads
 
         # Per-frame gesture state.
@@ -347,6 +367,7 @@ class HandCursorEngine:
         self._scroll_base_y = None   # scroll gesture reference Y
         self._scroll_acc = 0.0       # fractional wheel clicks
         self._lost_since = None      # when the hand last disappeared
+        self._lost_handled = False   # hand-loss cleanup done for this gap
         self._last_preview = 0.0
         self._last_state = 0.0
         self._screen = (1920, 1080)
@@ -356,16 +377,15 @@ class HandCursorEngine:
         self._candidate = None       # pose seen in the current run
         self._candidate_frames = 0   # consecutive frames for that pose
         self._pinch_engaged = False  # hysteresis latch for the pinch
-        self._mode_since = 0.0       # when the current stable mode began
         self._last_size_event = 0.0  # throttle for calibration size events
         self._drag_beeped = False    # left-click beeped at drag start
         self._right_drag_beeped = False  # right-click beeped at drag start
         self.training = False          # gesture trainer mode (no mouse driving)
         self._driver_mode = "cursor"   # "cursor" | "macros" | "touchpad"
         self._macro_pts = []           # stroke points collected during draw
-        self._macro_last_ts = 0.0      # timestamp of last stored sample
         self._macro_last_pt = None     # last stored (x, y)
         self._macro_commit_ts = 0.0    # when the finger stopped moving
+        self._macro_armed = False      # a stroke is actively being collected
         self._tp_center = None         # last hand-center (touchpad relative)
         self._tp_sm = (0.0, 0.0)       # EMA-smoothed per-frame delta
 
@@ -379,19 +399,21 @@ class HandCursorEngine:
         finished), it is stopped and reaped first so two threads never open
         the same webcam together.
         """
-        old = self._thread
-        if old is not None:
-            if old.is_alive():
-                self.stop()
+        with self._lifecycle_lock:
+            old = self._thread
+            if old is not None:
                 if old.is_alive():
-                    raise RuntimeError(
-                        "The previous hand-cursor thread did not exit; "
-                        "the camera may still be busy.")
-            self._thread = None
-        self._running.set()
-        self._thread = threading.Thread(
-            target=self._run, name="hand-cursor", daemon=True)
-        self._thread.start()
+                    self._stop_locked()
+                    if old.is_alive():
+                        raise RuntimeError(
+                            "The previous hand-cursor thread did not exit; "
+                            "the camera may still be busy.")
+                self._thread = None
+            self._running.set()
+            thread = threading.Thread(
+                target=self._run, name="hand-cursor", daemon=True)
+            self._thread = thread
+            thread.start()
 
     def stop(self):
         """Stop the loop and hand the webcam back to the OS.
@@ -400,9 +422,14 @@ class HandCursorEngine:
         one thread is blocked inside a read, and every thread reference is
         cleared so the engine can be restarted cleanly afterwards.
         """
+        with self._lifecycle_lock:
+            self._stop_locked()
+
+    def _stop_locked(self):
+        """Shared stop logic; the caller must hold the lifecycle lock."""
         self._running.clear()
         self._release_camera()
-        thread, self._thread = self._thread, None
+        thread = self._thread
         if thread is not None:
             thread.join(timeout=2.0)
             if thread.is_alive():
@@ -415,11 +442,32 @@ class HandCursorEngine:
                     pass
                 self._release_camera()
                 thread.join(timeout=1.0)
+            if thread.is_alive():
+                # A truly wedged thread keeps its reference so start() can
+                # reap it later instead of spawning a competing thread.
+                self._thread = thread
+            else:
+                self._thread = None
         self._release_button()
         self._release_button(right=True)
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
+
+    def _reset_gesture_state(self):
+        """Drop every recognised-pose latch so a fresh hand must re-verify.
+
+        Called whenever the gesture stream is interrupted (reach-gate
+        disarm, hand loss, mode switch, training toggle) so a reappearing
+        hand can never re-enter its previous pose action without going
+        through STABLE_FRAMES debouncing again.
+        """
+        self._mode = None
+        self._candidate = None
+        self._candidate_frames = 0
+        self._pinch_engaged = False
+        self._scroll_base_y = None
+        self._scroll_acc = 0.0
 
     def set_emit_preview(self, flag):
         self.emit_preview = bool(flag)
@@ -440,6 +488,7 @@ class HandCursorEngine:
         live pass/fail feedback for every gesture.
         """
         self.training = bool(flag)
+        self._reset_gesture_state()
         if self.training:
             self._release_button()
             self._release_button(right=True)
@@ -452,12 +501,13 @@ class HandCursorEngine:
         if mode == self._driver_mode:
             return
         self._driver_mode = mode
+        self._reset_gesture_state()
         self._macro_pts.clear()
         self._macro_commit_ts = 0.0
         self._macro_last_pt = None
+        self._macro_armed = mode == "macros"
         self._tp_center = None
         self._tp_sm = (0.0, 0.0)
-        self._mode = None
         if mode == "cursor":
             self._send("log", "Mode: CURSOR")
         elif mode == "touchpad":
@@ -529,6 +579,8 @@ class HandCursorEngine:
                 self._send("beep", "left")
 
     def _press_button(self, right=False):
+        if not self._running.is_set() or self.training:
+            return
         if right:
             if not self._right_down:
                 self._right_down = True
@@ -675,6 +727,20 @@ class HandCursorEngine:
             self._armed = True
         return self._armed
 
+    # ------------------------------------------------------------------
+    # Finger extraction helper (shared by _handle_landmarks & training)
+    # ------------------------------------------------------------------
+    def _fingers_of(self, lm):
+        """Return a 5-tuple of booleans: thumb, index, middle, ring, pinky
+        extended."""
+        return [
+            self._thumb_ext(lm),
+            self._finger_ext(lm, INDEX_PIP, INDEX_TIP),
+            self._finger_ext(lm, MIDDLE_PIP, MIDDLE_TIP),
+            self._finger_ext(lm, RING_PIP, RING_TIP),
+            self._finger_ext(lm, PINKY_PIP, PINKY_TIP),
+        ]
+
     def _handle_landmarks(self, lm):
         """Classify the hand and drive the mouse.
 
@@ -683,13 +749,7 @@ class HandCursorEngine:
           * fingers - list of 5 booleans (thumb, index, middle, ring, pinky)
                       saying whether each finger is currently extended.
         """
-        fingers = [
-            self._thumb_ext(lm),
-            self._finger_ext(lm, INDEX_PIP, INDEX_TIP),
-            self._finger_ext(lm, MIDDLE_PIP, MIDDLE_TIP),
-            self._finger_ext(lm, RING_PIP, RING_TIP),
-            self._finger_ext(lm, PINKY_PIP, PINKY_TIP),
-        ]
+        fingers = self._fingers_of(lm)
         n_up = sum(fingers)
         hand_size = self._hand_size_norm(lm)
 
@@ -712,11 +772,13 @@ class HandCursorEngine:
                 hand_size):
             self._release_button()
             self._release_button(right=True)
-            self._candidate = None
-            self._candidate_frames = 0
-            label = "REACH TOWARD SCREEN" if not self._armed \
-                else "MOVING AWAY?"
-            self._emit_state(label, None)
+            self._reset_gesture_state()
+            # An interrupted draw stroke must not merge into the next one.
+            self._macro_pts.clear()
+            self._macro_last_pt = None
+            self._macro_commit_ts = 0.0
+            self._macro_armed = False
+            self._emit_state("REACH TOWARD SCREEN", None)
             return "REACH TOWARD SCREEN", fingers
 
         # ---- 2) classify + debounce (STABLE_FRAMES) -------------------------
@@ -730,7 +792,6 @@ class HandCursorEngine:
         if (self._candidate_frames >= STABLE_FRAMES and
                 candidate != self._mode):
             self._mode = candidate
-            self._mode_since = time.time()
             self._scroll_base_y = None
             self._scroll_acc = 0.0
 
@@ -822,27 +883,37 @@ class HandCursorEngine:
         label = "DRAW"
         fingers = [1, 1, 0, 0, 0]  # placeholder shown on finger panel
 
-        # Store a new sample only if it has moved enough from the last one.
-        should_store = (
-            self._macro_last_pt is None
-            or math.hypot(pt[0] - self._macro_last_pt[0],
-                          pt[1] - self._macro_last_pt[1]) >= MACRO_SAMPLE_GAP
-        )
-        if should_store:
+        if not self._macro_armed:
+            # Idle after a commit: wait until the finger clearly moves away
+            # from the last anchor before a fresh stroke may start. This is
+            # what stops a resting hand from re-finalising a bogus
+            # one-point "stroke" every second.
+            if self._macro_last_pt is not None and \
+                    math.hypot(pt[0] - self._macro_last_pt[0],
+                               pt[1] - self._macro_last_pt[1]) \
+                    < MACRO_SAMPLE_GAP:
+                self._emit_state(label, fingers)
+                return label, fingers
+            self._macro_armed = True
+
+        moved = (self._macro_last_pt is None or
+                 math.hypot(pt[0] - self._macro_last_pt[0],
+                            pt[1] - self._macro_last_pt[1])
+                 >= MACRO_SAMPLE_GAP)
+        if moved:
             self._macro_pts.append(pt)
             self._macro_last_pt = pt
-            self._macro_last_ts = now
             self._macro_commit_ts = now
-        elif self._macro_last_pt is not None:
-            # Finger held still â€” check dwell to commit.
-            if (now - self._macro_commit_ts) >= MACRO_COMMIT_TIME:
-                self._finalize_macro()
+        elif self._macro_pts and \
+                (now - self._macro_commit_ts) >= MACRO_COMMIT_TIME:
+            # Finger held still - check dwell to commit the collected stroke.
+            self._finalize_macro()
 
         # Also commit when the stroke gets suspiciously long.
         if len(self._macro_pts) >= 500:
             self._finalize_macro()
 
-        self._emit_state("DRAW", None)
+        self._emit_state(label, fingers)
         return label, fingers
 
     def _finalize_macro(self):
@@ -856,9 +927,11 @@ class HandCursorEngine:
         else:
             self._send("macro", None)
             self._send("log", "Draw macro: stroke too short")
+        last = self._macro_last_pt
         self._macro_pts = []
-        self._macro_last_pt = None
+        self._macro_last_pt = last
         self._macro_commit_ts = 0.0
+        self._macro_armed = False
 
     def _training_step(self, lm):
         """Gesture-trainer mode: classify but never move/click the mouse.
@@ -867,13 +940,7 @@ class HandCursorEngine:
         pass/fail for every gesture. Returns `(label, fingers)` so the
         preview overlay still renders normally.
         """
-        fingers = [
-            self._thumb_ext(lm),
-            self._finger_ext(lm, INDEX_PIP, INDEX_TIP),
-            self._finger_ext(lm, MIDDLE_PIP, MIDDLE_TIP),
-            self._finger_ext(lm, RING_PIP, RING_TIP),
-            self._finger_ext(lm, PINKY_PIP, PINKY_TIP),
-        ]
+        fingers = self._fingers_of(lm)
         hand_size = self._hand_size_norm(lm)
 
         self._release_button()
@@ -955,46 +1022,49 @@ class HandCursorEngine:
     # Main loop (engine thread)
     # ------------------------------------------------------------------
     def _run(self):
-        cap = cv2.VideoCapture(self.camera_index)
-        # Lower the acquisition latency: 640x480 is enough for gesture
-        # tracking and the inference stage already downscales to 320 wide.
-        for prop, value in ((cv2.CAP_PROP_FRAME_WIDTH, 640),
-                            (cv2.CAP_PROP_FRAME_HEIGHT, 480),
-                            (cv2.CAP_PROP_BUFFERSIZE, 1)):
+        cap = None
+        hands = None
+        try:
+            cap = cv2.VideoCapture(self.camera_index)
+            # Lower the acquisition latency: 640x480 is enough for gesture
+            # tracking and the inference stage already downscales to 320 wide.
+            for prop, value in ((cv2.CAP_PROP_FRAME_WIDTH, 640),
+                                (cv2.CAP_PROP_FRAME_HEIGHT, 480),
+                                (cv2.CAP_PROP_BUFFERSIZE, 1)):
+                try:
+                    cap.set(prop, value)
+                except Exception:
+                    pass
+            if not cap.isOpened():
+                self._send("error",
+                           f"Camera {self.camera_index} could not be opened. "
+                           "Check the webcam and Cam selector.")
+                return
+            with self._cap_lock:
+                self._cap = cap
             try:
-                cap.set(prop, value)
+                self._screen = tuple(int(v) for v in pyautogui.size())
             except Exception:
                 pass
-        if not cap.isOpened():
+
             try:
-                cap.release()
-            except Exception:
-                pass
-            self._send("error",
-                       f"Camera {self.camera_index} could not be opened. "
-                       "Check the webcam and Cam selector.")
-            return
-        with self._cap_lock:
-            self._cap = cap
-        try:
-            self._screen = tuple(int(v) for v in pyautogui.size())
-        except Exception:
-            pass
+                hands = mp.solutions.hands.Hands(
+                    static_image_mode=False,
+                    max_num_hands=1,
+                    min_detection_confidence=0.5,
+                    min_tracking_confidence=0.5,
+                )
+            except Exception as exc:
+                self._send("error",
+                           f"Hand model failed to load: {exc}")
+                return
+            self._send("started",
+                       f"Hand cursor started on camera {self.camera_index}.")
+            self._send("log", "Bring your hand close to the screen to arm the "
+                              "cursor. Gestures: index/open=move  pinch=click  "
+                              "peace=scroll  three=right click  fist=drag.")
 
-        hands = mp.solutions.hands.Hands(
-            static_image_mode=False,
-            max_num_hands=1,
-            min_detection_confidence=0.5,
-            min_tracking_confidence=0.5,
-        )
-        self._send("started",
-                   f"Hand cursor started on camera {self.camera_index}.")
-        self._send("log", "Bring your hand close to the screen to arm the "
-                          "cursor. Gestures: index/open=move  pinch=click  "
-                          "peace=scroll  three=right click  fist=drag.")
-
-        frame_dt = 1.0 / MAX_FPS
-        try:
+            frame_dt = 1.0 / MAX_FPS
             while self._running.is_set():
                 started = time.time()
 
@@ -1004,6 +1074,8 @@ class HandCursorEngine:
                     self._send("error", f"Camera read error: {exc}")
                     break
                 if not ok:
+                    if not self._running.is_set():
+                        break
                     # A single glitch is tolerated; a dead or busy webcam
                     # shows up as many consecutive failures and we bail out.
                     self._bad_reads += 1
@@ -1017,18 +1089,30 @@ class HandCursorEngine:
                     break
 
                 # Mirror the feed so it feels like a mirror (natural).
-                frame = cv2.flip(frame, 1)
-                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                # Downscale only for inference -> faster, pointer still smooth.
-                small = cv2.resize(rgb, (320, int(rgb.shape[0] *
-                                                  (320 / rgb.shape[1]))))
-                results = hands.process(small)
+                try:
+                    frame = cv2.flip(frame, 1)
+                    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    # Downscale only for inference -> faster, pointer smooth.
+                    small = cv2.resize(
+                        rgb, (320, int(rgb.shape[0] *
+                                       (320 / max(rgb.shape[1], 1)))))
+                    results = hands.process(small)
+                except Exception:
+                    # Decode failure is treated like a transient bad read.
+                    self._bad_reads += 1
+                    if self._bad_reads >= BAD_READ_LIMIT:
+                        self._send(
+                            "error",
+                            "The webcam feed could not be decoded.")
+                        break
+                    continue
 
                 overlay_text = None
                 fingers = None
                 landmarks = None
                 if results.multi_hand_landmarks:
                     self._lost_since = None
+                    self._lost_handled = False
                     try:
                         landmark = results.multi_hand_landmarks[0].landmark
                         if self.training:
@@ -1049,6 +1133,9 @@ class HandCursorEngine:
                         self._release_button(right=True)
                     if self._driver_mode == "macros" and self._macro_pts:
                         self._finalize_macro()
+                    if not self._lost_handled:
+                        self._lost_handled = True
+                        self._reset_gesture_state()
 
                 if (self.emit_preview and self.on_preview is not None and
                         time.time() - self._last_preview >= 1.0 / PREVIEW_FPS):
@@ -1066,16 +1153,21 @@ class HandCursorEngine:
         finally:
             self._release_button()
             self._release_button(right=True)
-            try:
-                hands.close()
-            except Exception:
-                pass
+            if hands is not None:
+                try:
+                    hands.close()
+                except Exception:
+                    pass
             with self._cap_lock:
-                if self._cap is cap:
+                if cap is not None and self._cap is cap:
                     self._cap = None
-            try:
-                cap.release()
-            except Exception:
-                pass
+            if cap is not None:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
             self._bad_reads = 0
+            self._macro_pts.clear()
+            self._macro_armed = False
+            self._reset_gesture_state()
             self._send("stopped", "Hand cursor stopped.")

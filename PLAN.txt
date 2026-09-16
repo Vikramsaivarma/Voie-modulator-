@@ -59,6 +59,14 @@ Command branches: app launch, browser, window, system keys, volume,
    clipboard click-to-paste card; calibration live size readout.)
 
 - hand_cursor.py : MediaPipe hand engine (daemon thread).
+  v1.8: GESTURE-SAFETY - reach-gate disarm + hand-loss now reset (_mode,
+        _candidate, _pinch_engaged) so a reappearing hand must re-verify
+        STABLE_FRAMES before it can click (no phantom clicks); _press_button
+        refuses presses while stopped/training; macro mode uses a "stroke in
+        progress" flag (no bogus ('macro', None) echo while idling, no
+        interrupted-stroke merging); start()/stop() serialised on a lifecycle
+        lock and a zombie thread keeps its reference so start() always reaps
+        it; every _run exit path releases the camera + emits 'stopped'.
   v1.6: DRAW MACROS - driver mode "macros" (set_mode) plus a built-in
         $1-style stroke recognizer (_recognize_macro + MACRO_TEMPLATES).
         Emits ("macro", name)/(("macro", None); never drives the mouse
