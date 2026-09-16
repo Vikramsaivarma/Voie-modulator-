@@ -58,9 +58,28 @@
  * `start()`/`stop()` are serialised on a lifecycle lock, so a concurrent
    stop cannot race the thread creation, and a zombie thread that survives
    a stop keeps its reference so the next `start()` always reaps it.
- * Every `_run()` exit path (camera open failure, model load failure, read
-   failure, stop) now reaches a single `finally` that releases the capture
-   and emits ``'stopped'`` - the app can never be stuck in "starting".
+* Every `_run()` exit path (camera open failure, model load failure, read
+    failure, stop) now reaches a single `finally` that releases the capture
+    and emits ``'stopped'`` - the app can never be stuck in "starting".
+
+ TWO-HAND MODE (v1.9)
+ --------------------
+ With `two_hand=True` MediaPipe is asked for up to two hands. The hand
+ NEAREST the camera (largest normalised size) is the pointer hand and works
+ exactly as before; the second hand becomes a MODIFIER and only ever holds
+ a keyboard key, it never moves the cursor and never triggers mouse buttons:
+
+     Open hand (4+ fingers) .... hold CTRL
+     Fist ...................... hold SHIFT
+     Peace sign ............... hold ALT
+     3 fingers ................ hold WIN key
+
+ The modifier pose must be stable for STABLE_FRAMES before the key goes
+ down (same anti-accident debounce as gestures), a pose change re-keypresses
+ cleanly (old key released first), and the key is always released when the
+ second hand leaves the frame, the pointer hand disarms, training starts,
+ or the engine stops - a stuck modifier key is impossible. With a single
+ hand in view the behaviour is byte-for-byte identical to v1.8.
 
  ANTI-ACCIDENT DESIGN (v1.2)
  ---------------------------
@@ -83,7 +102,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.8.0
+ VERSION   : 1.9.0
 ==============================================================================
 """
 
@@ -338,7 +357,7 @@ class HandCursorEngine:
 
     def __init__(self, camera_index=0, sensitivity=1.0, scroll_speed=1.0,
                  emit_preview=False, on_event=None, on_preview=None,
-                 arm_size=None, disarm_size=None):
+                 arm_size=None, disarm_size=None, two_hand=True):
         if not HAND_DEPS_OK:
             raise RuntimeError("Hand-tracking packages are not installed.")
         self.camera_index = int(camera_index)
@@ -349,6 +368,7 @@ class HandCursorEngine:
         self.on_preview = on_preview
         self._arm_size = float(arm_size) if arm_size else ARM_SIZE
         self._disarm_size = float(disarm_size) if disarm_size else DISARM_SIZE
+        self.two_hand = bool(two_hand)  # 2nd hand = modifier key
 
         self._running = threading.Event()
         self._thread = None
@@ -388,6 +408,12 @@ class HandCursorEngine:
         self._macro_armed = False      # a stroke is actively being collected
         self._tp_center = None         # last hand-center (touchpad relative)
         self._tp_sm = (0.0, 0.0)       # EMA-smoothed per-frame delta
+
+        # Modifier-hand (second hand) state.
+        self._mod_pose = None          # pose currently being held by hand 2
+        self._mod_frames = 0           # consecutive frames for that pose
+        self._mod_key = None           # keyboard key currently held down
+        self._mod_lost_since = None    # when hand 2 last disappeared
 
     # ------------------------------------------------------------------
     # Public control API
@@ -665,6 +691,89 @@ class HandCursorEngine:
         if extra:
             text = f"{text}  {extra}"
         self._send("hand_state", text)
+
+    # ------------------------------------------------------------------
+    # Modifier hand (two-hand mode)
+    # ------------------------------------------------------------------
+    # The second hand only ever holds a keyboard modifier key; it never
+    # moves the cursor and never presses a mouse button. Mapping is decided
+    # from the raw finger count so it shares no mutable gesture state with
+    # the pointer hand (candidate/pinch cannot race between the two hands).
+    MOD_OPEN  = "ctrl"
+    MOD_FIST  = "shift"
+    MOD_PEACE = "alt"
+    MOD_THREE = "win"
+
+    def _modifier_key_for(self, lm):
+        """Which modifier key the second hand should hold, or None."""
+        n_up = sum(self._fingers_of(lm))
+        if n_up >= 4:
+            return self.MOD_OPEN
+        if n_up == 3:
+            return self.MOD_THREE
+        if n_up == 2:
+            return self.MOD_PEACE
+        if n_up == 0:
+            return self.MOD_FIST
+        return None
+
+    def _release_modifier(self):
+        """Always-safe key release; resets every modifier latch."""
+        if self._mod_key is not None:
+            try:
+                pyautogui.keyUp(self._mod_key)
+            except Exception:
+                pass
+            self._mod_key = None
+        self._mod_pose = None
+        self._mod_frames = 0
+        self._mod_lost_since = None
+
+    def _update_modifier(self, lm):
+        """Track the second hand and hold the matching modifier key.
+
+        Called once per frame AFTER the pointer hand was handled, with
+        ``lm=None`` when only one (or no) hand is in the frame.
+        """
+        if not self.two_hand or self.training:
+            self._release_modifier()
+            return
+        # The modifier is meaningless without an active pointer hand.
+        if self._driver_mode not in ("touchpad", "macros") and not self._armed:
+            self._release_modifier()
+            return
+        if lm is None:
+            if self._mod_lost_since is None:
+                self._mod_lost_since = time.time()
+            elif time.time() - self._mod_lost_since > 0.6:
+                self._release_modifier()
+            return
+        self._mod_lost_since = None
+
+        want = self._modifier_key_for(lm)
+        if want == self._mod_pose:
+            self._mod_frames += 1
+        else:
+            self._mod_pose = want
+            self._mod_frames = 1
+        # Same anti-accident debounce as the pointer gestures.
+        target = want if self._mod_frames >= STABLE_FRAMES else None
+
+        if target == self._mod_key:
+            return
+        if self._mod_key is not None:
+            try:
+                pyautogui.keyUp(self._mod_key)
+            except Exception:
+                pass
+            self._mod_key = None
+        if target is not None:
+            try:
+                pyautogui.keyDown(target)
+            except Exception:
+                pass
+            self._mod_key = target
+            self._send("hand_state", f"MOD KEY HOLD: {target.upper()}")
 
     # ------------------------------------------------------------------
     # Gesture handling
@@ -978,8 +1087,9 @@ class HandCursorEngine:
             return (60, 200, 60)         # green (BGR)
         return (120, 120, 120)           # grey
 
-    def _draw_overlay(self, frame, label, lms=None, fingers=None):
-        """Draw the hand skeleton, finger states and recognised gesture."""
+    def _draw_overlay(self, frame, label, lms=None, fingers=None,
+                     mod_lms=None):
+        """Draw the hand skeleton(s), finger states and recognised gesture."""
         h, w = frame.shape[:2]
 
         if lms is not None:
@@ -989,6 +1099,19 @@ class HandCursorEngine:
                     mp_drawing.DrawingSpec(color=(60, 220, 60), thickness=2,
                                            circle_radius=3),
                     mp_drawing.DrawingSpec(color=(0, 210, 255), thickness=2),
+                )
+            except Exception:
+                pass
+
+        # The modifier hand (two-hand mode) is drawn in amber - it never
+        # drives the cursor, it only holds a keyboard modifier.
+        if mod_lms is not None:
+            try:
+                mp_drawing.draw_landmarks(
+                    frame, mod_lms, mp_hands.HAND_CONNECTIONS,
+                    mp_drawing.DrawingSpec(color=(0, 180, 220), thickness=1,
+                                           circle_radius=2),
+                    mp_drawing.DrawingSpec(color=(40, 120, 160), thickness=1),
                 )
             except Exception:
                 pass
@@ -1050,7 +1173,7 @@ class HandCursorEngine:
             try:
                 hands = mp.solutions.hands.Hands(
                     static_image_mode=False,
-                    max_num_hands=1,
+                    max_num_hands=2 if self.two_hand else 1,
                     min_detection_confidence=0.5,
                     min_tracking_confidence=0.5,
                 )
@@ -1063,6 +1186,11 @@ class HandCursorEngine:
             self._send("log", "Bring your hand close to the screen to arm the "
                               "cursor. Gestures: index/open=move  pinch=click  "
                               "peace=scroll  three=right click  fist=drag.")
+            if self.two_hand:
+                self._send("log", "Two-hand mode: the nearest hand drives the "
+                                  "cursor, the second hand holds a modifier - "
+                                  "open=ctrl  fist=shift  peace=alt  "
+                                  "three=win.")
 
             frame_dt = 1.0 / MAX_FPS
             while self._running.is_set():
@@ -1110,18 +1238,29 @@ class HandCursorEngine:
                 overlay_text = None
                 fingers = None
                 landmarks = None
+                mod_lms = None
                 if results.multi_hand_landmarks:
                     self._lost_since = None
                     self._lost_handled = False
                     try:
-                        landmark = results.multi_hand_landmarks[0].landmark
+                        # Pointer hand = the one NEAREST the camera (largest
+                        # normalised size); the other hand, when present, only
+                        # ever holds a modifier key (two-hand mode).
+                        ordered = sorted(
+                            results.multi_hand_landmarks,
+                            key=lambda h: self._hand_size_norm(h.landmark),
+                            reverse=True)
+                        hand0 = ordered[0]
+                        landmark = hand0.landmark
                         if self.training:
                             overlay_text, fingers = self._training_step(landmark)
                         elif self._driver_mode == "macros":
                             overlay_text, fingers = self._handle_macro(landmark)
                         else:
                             overlay_text, fingers = self._handle_landmarks(landmark)
-                        landmarks = results.multi_hand_landmarks[0]
+                        landmarks = hand0
+                        if len(ordered) > 1:
+                            mod_lms = ordered[1]
                     except Exception as exc:
                         self._send("log", f"[!] Gesture error: {exc}")
 
@@ -1136,13 +1275,18 @@ class HandCursorEngine:
                     if not self._lost_handled:
                         self._lost_handled = True
                         self._reset_gesture_state()
+                        self._release_modifier()
+
+                # Second hand -> modifier key (also releases when absent).
+                self._update_modifier(
+                    mod_lms.landmark if mod_lms is not None else None)
 
                 if (self.emit_preview and self.on_preview is not None and
                         time.time() - self._last_preview >= 1.0 / PREVIEW_FPS):
                     self._last_preview = time.time()
                     try:
                         self._draw_overlay(frame, overlay_text,
-                                           landmarks, fingers)
+                                           landmarks, fingers, mod_lms)
                         self.on_preview(frame)
                     except Exception:
                         pass
@@ -1153,6 +1297,7 @@ class HandCursorEngine:
         finally:
             self._release_button()
             self._release_button(right=True)
+            self._release_modifier()
             if hands is not None:
                 try:
                     hands.close()

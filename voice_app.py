@@ -76,6 +76,12 @@
    session, and every after() loop (queue poller, clipboard watcher,
    calibration wizard) stops re-scheduling the moment _closing is set - so
    no callback can touch a destroyed window.
+ * TWO-HAND MODE (v5.8.0): hand_cursor v1.9.0 - when your second hand comes
+   into view it only ever holds a keyboard modifier (open=Ctrl, fist=Shift,
+   peace=Alt, three=Win) while the hand nearest the camera keeps driving the
+   cursor exactly as before. The key is debounced for STABLE_FRAMES, always
+   released on pose change / hand loss / stop, and a "2 Hands" checkbox in
+   the HAND CURSOR card toggles it live (persisted in voc_config.json).
  * SETTINGS PERSISTENCE (v5.7.0): camera, preview, click-beep, TTS voice,
    speech rate, hand sensitivity and scroll speed are now saved to
    voc_config.json the instant you touch them (previously they only stuck
@@ -132,7 +138,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.7.0
+VERSION   : 5.8.0
 ================================================================================
 """
 
@@ -382,6 +388,7 @@ DEFAULT_CONFIG = {
     "macro_actions": {},        # optional per-shape action overrides
     "touchpad_mode": False,     # True = hand engine starts in TOUCHPAD mode
     "touchpad_gain": 2.5,       # relative-motion speed multiplier
+    "two_hand": True,           # 2nd hand holds a modifier key (ctrl/shift/alt/win)
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -820,6 +827,16 @@ class VoiceControlApp:
             activeforeground=MUTED, highlightthickness=0, bd=0,
             command=self._on_preview_toggle,
         ).pack(side=tk.LEFT, padx=(10, 0))
+
+        self.two_hand_var = tk.BooleanVar(
+            value=bool(self.config.get("two_hand", True)))
+        tk.Checkbutton(
+            hand_row, text="2 Hands", variable=self.two_hand_var,
+            font=(FONT_NAME, 8), bg=SUBTLE_BG, fg=MUTED,
+            selectcolor=BG_COLOR, activebackground=SUBTLE_BG,
+            activeforeground=MUTED, highlightthickness=0, bd=0,
+            command=self._on_two_hand_toggle,
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         # ---- Sensitivity + scroll sliders + CALIBRATE ----------------------
         hand_sliders = tk.Frame(hand_card, bg=SUBTLE_BG)
@@ -2889,6 +2906,15 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self.preview_canvas.configure(text="(preview turned off)")
         save_config(self.config)
 
+    def _on_two_hand_toggle(self):
+        on = bool(self.two_hand_var.get())
+        self.config["two_hand"] = on
+        if self._hand_engine is not None:
+            self._hand_engine.two_hand = on
+        state = "ON" if on else "OFF"
+        self._append_log(f"[i] Two-hand modifier mode: {state}")
+        save_config(self.config)
+
     def _on_sensitivity_change(self, _val):
         self.config["hand_sensitivity"] = float(self.sensitivity_var.get())
         if self._hand_engine is not None:
@@ -3103,6 +3129,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                     self._hand_preview(frame, _e),
                 arm_size=arm if arm else None,
                 disarm_size=disarm if disarm else None,
+                two_hand=bool(self.config.get("two_hand", True)),
             )
         except Exception as exc:
             self._post("log", f"[!] Hand cursor failed to start: {exc}")

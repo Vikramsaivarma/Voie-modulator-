@@ -5,7 +5,7 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v5.7.0 works end-to-end (voice, waveform UI, timers, clipboard history,
+STATUS: v5.8.0 works end-to-end (voice, waveform UI, timers, clipboard history,
 screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
 log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
 live tuning, chained commands, wake word aliases, timer toast popups,
@@ -30,10 +30,17 @@ voc_config.json the instant they change (used to depend on close-time
 saves); the TTS voice dropdown pre-selects the saved profile (stored id is
 matched back to its display name); the gemini_model fallback is consistent
 everywhere.
-hand_cursor.py itself is on v1.8.0.
+v5.8.0 added TWO-HAND SUPPORT (spiral 5 / Phase D): the engine (hand_cursor
+v1.9.0) now tracks up to 2 hands - the one nearest the camera keeps driving
+the cursor exactly as before, while the second hand only ever holds a
+keyboard modifier (open=Ctrl, fist=Shift, peace=Alt, three=Win). The
+modifier pose is debounced, old keys are released before a new one presses,
+and the key is always released on hand loss / pointer disarm / two_hand-off
+/ engine stop. Config: two_hand (default True) + live "2 Hands" checkbox.
+hand_cursor.py itself is on v1.9.0.
 
 -------------------------------------------------------------------------------
-1) CURRENT ARCHITECTURE (v5.7)
+1) CURRENT ARCHITECTURE (v5.8)
 -------------------------------------------------------------------------------
 - voice_app.py   ~3500 lines : tkinter GUI + controller.
   Threads:  "stt"    (speech -> text, Google Web API)
@@ -75,6 +82,11 @@ v5.6: CLEAN SHUTDOWN - on_close() signals the timer runner (flag) and the
     dropdown matches the stored voice id back to a display name so the
     saved profile pre-selects; the gemini_model default fallback is
     consistent at every read site.
+    v5.8: TWO-HAND MODE - the engine (hand_cursor v1.9.0) tracks up to 2
+    hands; the nearest hand drives the cursor as before while the second
+    hand holds a modifier key (open=Ctrl, fist=Shift, peace=Alt, three=Win)
+    that is debounced, non-sticking and always released on loss/disarm/off;
+    "2 Hands" checkbox toggles it live (config two_hand, default True).
    v5.4: TOUCHPAD - TOUCHPAD button (or voice "touchpad mode") switches the
    engine to a RELATIVE mouse: the pointer follows accumulated hand-center
    deltas, like a laptop trackpad, so it never teleports and feels like a
@@ -98,6 +110,12 @@ v5.6: CLEAN SHUTDOWN - on_close() signals the timer runner (flag) and the
         interrupted-stroke merging); start()/stop() serialised on a lifecycle
         lock and a zombie thread keeps its reference so start() always reaps
         it; every _run exit path releases the camera + emits 'stopped'.
+  v1.9: TWO-HAND MODIFIER - HandCursorEngine(two_hand=True) tracks up to 2
+        hands (max_num_hands=2); the hand nearest the camera (largest
+        normalised size) stays the pointer, the second hand holds a key:
+        open=Ctrl fist=Shift peace=Alt three=Win. Own debounce latch + loss
+        timer; the modifier key is released on pose change, hand loss,
+        pointer disarm (air-cursor mode), training or engine stop.
   v1.6: DRAW MACROS - driver mode "macros" (set_mode) plus a built-in
         $1-style stroke recognizer (_recognize_macro + MACRO_TEMPLATES).
         Emits ("macro", name)/(("macro", None); never drives the mouse
@@ -180,6 +198,6 @@ PHASE D - GESTURE X / PRODUCTISATION
 4) NEXT SHIPMENT (playbook for continuing)
   1. Phase D: two-hand support (primary pointer + modifier hand).
   2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
-  3. Run full smoke suite (py_compile + test_v58.py), update QUICK_START.txt
+  3. Run full smoke suite (py_compile + test_v59.py), update QUICK_START.txt
      + this PLAN, then git add -A && commit && push to origin/main.
 ===============================================================================

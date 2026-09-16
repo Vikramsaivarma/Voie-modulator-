@@ -1,15 +1,17 @@
-"""Smoke-test suite for VoiceControlApp v5.7.0 (settings persistence + UI).
+"""Smoke-test suite for VoiceControlApp v5.8.0 (two-hand modifier mode).
 
-Supersedes test_v57.py: keeps all v5.2..v5.6.0 regression checks and adds
-the v5.7.0 coverage:
+Supersedes test_v58.py: keeps all v5.2..v5.7.0 regression checks and adds
+the v5.8.0 / hand_cursor v1.9.0 coverage:
 
-  * camera/preview/beep/voice/rate/sensitivity/scroll-settings now persist
-    to voc_config.json the instant they change (save_config called from the
-    GUI callbacks).
-  * the TTS voice dropdown pre-selects the saved profile (stored voice id
-    is matched back to its display name).
-  * the gemini_model fallback is consistent with the canonical default.
-  * (kept) v5.6.0 on_close teardown + after() closing guards.
+  * the hand engine detects up to 2 hands; the nearest hand drives the
+    cursor and the second hand only holds a modifier key (open=Ctrl,
+    fist=Shift, peace=Alt, three=Win).
+  * the modifier key is debounced (STABLE_FRAMES), an old key is released
+    before a new one is pressed, and the key is always released on hand
+    loss / pointer disarm / two_hand off / engine stop.
+  * the app default enables two_hand, the "2 Hands" checkbox toggles it
+    live + persists it, and start_hand_cursor passes it into the engine.
+  * (kept) v5.6.0 on_close teardown, v5.7.0 settings persistence.
 """
 import os
 import sys
@@ -628,6 +630,159 @@ app._closing = False
 print("Calibration closing guard OK")
 
 # ----------------------------------------------------------------------
+# v5.8.0 / hand_cursor v1.9 NEW: two-hand modifier key
+# ----------------------------------------------------------------------
+print("--- TWO-HAND MODIFIER KEY MAPPING (v1.9.0) ---")
+engine._armed = True
+engine.training = False
+engine.two_hand = True
+engine._driver_mode = "cursor"
+
+engine._release_modifier()
+kd = []
+ku = []
+orig_kd_k, orig_ku_k = hc.pyautogui.keyDown, hc.pyautogui.keyUp
+hc.pyautogui.keyDown = lambda k: kd.append(k)
+hc.pyautogui.keyUp = lambda k: ku.append(k)
+try:
+    modifier_map = {
+        "open": "ctrl", "fist": "shift",
+        "peace": "alt", "three": "win", "move": None,
+    }
+    for pose_name, lm in poses.items():
+        engine._release_modifier()
+        kd.clear()
+        ku.clear()
+        for _ in range(hc.STABLE_FRAMES + 2):
+            engine._update_modifier(lm)
+        want = modifier_map[pose_name]
+        if want:
+            assert kd == [want], f"{pose_name}: held {kd}, want {want}"
+            assert engine._mod_key == want, \
+                f"{pose_name}: _mod_key {engine._mod_key}"
+        else:
+            assert kd == [], f"{pose_name}: unexpected keyDown {kd}"
+            assert engine._mod_key is None, \
+                f"{pose_name}: unexpected key {engine._mod_key}"
+        assert ku == [], f"{pose_name}: unexpected keyUp {ku}"
+finally:
+    hc.pyautogui.keyDown = orig_kd_k
+    hc.pyautogui.keyUp = orig_ku_k
+print("Two-hand modifier key mapping OK")
+
+print("--- TWO-HAND POSE SWITCH RELEASES OLD KEY (v1.9.0) ---")
+engine._release_modifier()
+kd.clear()
+ku.clear()
+hc.pyautogui.keyDown = lambda k: kd.append(k)
+hc.pyautogui.keyUp = lambda k: ku.append(k)
+try:
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["open"])
+    assert engine._mod_key == "ctrl"
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["fist"])
+    assert ku == ["ctrl"], f"old key not released: {ku}"
+    assert kd == ["ctrl", "shift"], f"new key not pressed: {kd}"
+finally:
+    hc.pyautogui.keyDown = orig_kd_k
+    hc.pyautogui.keyUp = orig_ku_k
+print("Two-hand pose-switch key release OK")
+
+print("--- TWO-HAND LOSS / DISARM / OFF RELEASE KEY (v1.9.0) ---")
+engine._release_modifier()
+kd.clear()
+ku.clear()
+hc.pyautogui.keyDown = lambda k: kd.append(k)
+hc.pyautogui.keyUp = lambda k: ku.append(k)
+try:
+    # modifier hand walks out of the frame -> key released after the delay
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["open"])
+    assert engine._mod_key == "ctrl"
+    engine._update_modifier(None)
+    assert engine._mod_key == "ctrl", "released before the loss window"
+    engine._mod_lost_since = time.time() - 0.7
+    engine._update_modifier(None)
+    assert engine._mod_key is None and ku == ["ctrl"]
+    # pointer hand disarms -> modifier must not engage at all
+    engine._armed = False
+    kd.clear()
+    ku.clear()
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["open"])
+    assert kd == [] and engine._mod_key is None
+    engine._armed = True
+    # two_hand off -> never engages
+    engine.two_hand = False
+    kd.clear()
+    ku.clear()
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["open"])
+    assert kd == [] and engine._mod_key is None
+    engine.two_hand = True
+finally:
+    hc.pyautogui.keyDown = orig_kd_k
+    hc.pyautogui.keyUp = orig_ku_k
+print("Two-hand loss/disarm/off key release OK")
+
+print("--- TWO-HAND APP CONFIG + ENGINE WIRING (v5.8.0) ---")
+assert va.DEFAULT_CONFIG.get("two_hand") is True, \
+    "two_hand should default to ON"
+assert app.two_hand_var.get() is bool(app.config.get("two_hand", True))
+saved_calls2 = []
+orig_save2 = va.save_config
+va.save_config = lambda cfg: saved_calls2.append(dict(cfg))
+app.two_hand_var.set(True)
+try:
+    app._on_two_hand_toggle()
+    assert app.config["two_hand"] is True and len(saved_calls2) == 1
+finally:
+    va.save_config = orig_save2
+
+orig_factory = va.HandCursorEngine
+made = []
+
+
+class CapturingEngine(FakeEngine):
+    def set_sensitivity(self, _v):
+        pass
+
+    def set_scroll_speed(self, _v):
+        pass
+
+    def set_emit_preview(self, _v):
+        pass
+
+    def set_training(self, _v):
+        pass
+
+
+va.HandCursorEngine = lambda **kw: (made.append(kw) or CapturingEngine(**kw))
+app.start_hand_cursor = va.VoiceControlApp.start_hand_cursor.__get__(
+    app, va.VoiceControlApp)
+app.config["two_hand"] = False
+app._hand_engine = None
+app.start_hand_cursor()
+assert made[-1]["two_hand"] is False, \
+    f"engine built with two_hand={made[-1].get('two_hand')}"
+app.config["two_hand"] = True
+va.HandCursorEngine = lambda **kw: (made.append(kw) or CapturingEngine(**kw))
+app._hand_engine = None
+app.start_hand_cursor()
+assert made[-1]["two_hand"] is True, \
+    f"engine built with two_hand={made[-1].get('two_hand')}"
+va.HandCursorEngine = orig_factory
+if app._hand_engine is not None:
+    try:
+        app._hand_engine.stop()
+    except Exception:
+        pass
+app._hand_engine = None
+app.start_hand_cursor = lambda: None
+print("Two-hand app config + engine wiring OK")
+
+# ----------------------------------------------------------------------
 # v5.7.0 NEW: settings persistence + voice preselection + gemini fallback
 # ----------------------------------------------------------------------
 print("--- SETTINGS SAVE-CONFIG PERSISTENCE (v5.7.0) ---")
@@ -681,7 +836,7 @@ close_engine._running = True
 close_engine.stopped = 0
 app._hand_engine = close_engine
 
-print("=== ALL v5.7.0 TESTS PASSED ===")
+print("=== ALL v5.8.0 TESTS PASSED ===")
 app.on_close()  # real shutdown: engine.stop, toast cleanup, timer join, destroy
 
 # Re-tag the final success line printed above: on_close has now run.
@@ -772,4 +927,4 @@ app.config["hand_mode"] = orig_hand_mode
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.7.0 TESTS PASSED ===")
+print("=== ALL v5.8.0 TESTS PASSED ===")
