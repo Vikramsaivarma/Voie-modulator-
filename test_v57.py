@@ -1,13 +1,13 @@
-"""Smoke-test suite for VoiceControlApp v5.5.0 (GUI thread marshalling).
+"""Smoke-test suite for VoiceControlApp v5.6.0 (clean-shutdown hardening).
 
-Supersedes test_v55.py: keeps all v5.2..v5.4.1 regression checks and adds
-the v5.5.0 thread-safety coverage:
+Supersedes test_v56.py: keeps all v5.2..v5.5.0 regression checks and adds
+the v5.6.0 teardown coverage:
 
-  * _gui_call() runs tkinter work on the GUI thread (inline or queued).
-  * _append_log() is worker-safe (posted back to the GUI thread).
-  * voice/tray/hotkey workers no longer touch Tk widgets directly.
-  * hand-engine events are epoch-tagged so stale events from a previous
-    engine instance are dropped before they hit the GUI queue.
+  * on_close signals every worker thread (timer flag, TTS sentinel), joins
+    the timer runner, destroys leftover toast popups and closes the Gemini
+    HTTP session.
+  * every root.after() loop (queue poller, clipboard watcher) stops
+    re-scheduling the instant _closing is set.
 """
 import os
 import sys
@@ -144,7 +144,7 @@ print("_gui_call queued dispatch OK")
 print("--- _append_log WORKER-SAFE ---")
 log_path = os.path.join(os.path.dirname(os.path.abspath("voice_app.py")),
                         "voc_log.txt")
-marker = "[TEST] worker marshal marker v5.5.0"
+marker = "[TEST] worker marshal marker v5.6.0"
 wt = threading.Thread(target=lambda: app._append_log(marker), daemon=True)
 wt.start()
 wt.join()
@@ -581,6 +581,74 @@ app._hand_engine = None
 print("GUI engine reap + stop reset OK")
 
 # ----------------------------------------------------------------------
+# v5.6.0 NEW: clean-shutdown hardening (after() loops + on_close teardown)
+# ----------------------------------------------------------------------
+print("--- AFTER() LOOPS STOP RE-SCHEDULING WHEN CLOSING (v5.6.0) ---")
+orig_after = app.root.after
+after_calls = []
+
+
+def fake_after(ms, func, *args, **kwargs):
+    after_calls.append((ms, func))
+    return "fake-id"   # never really schedule
+
+
+app.root.after = fake_after
+app._closing = True
+app._poll_queue()
+assert after_calls == [], f"poller re-scheduled while closing: {after_calls}"
+app._watch_clipboard()
+assert after_calls == [], f"clipboard watcher re-scheduled while closing"
+# Open again -> both re-schedule exactly once.
+app._closing = False
+app._poll_queue()
+assert len(after_calls) == 1, f"poller should re-schedule once, got {after_calls}"
+app._watch_clipboard()
+assert len(after_calls) == 2, \
+    f"clipboard watcher should re-schedule once, got {after_calls}"
+app._closing = True
+app.root.after = orig_after
+print("after() loop closing guards OK")
+
+print("--- CALIBRATION SCHEDULE SAFE (v5.6.0) ---")
+app.root.after = orig_after
+app._closing = True
+app._calibrate_check()      # no-op, no crash
+orig_reach = app._calibrating
+try:
+    app._calibrating = False
+    app._calibrate_reach()  # guarded by _closing -> returns immediately
+    assert not app._calibrating
+finally:
+    app._calibrating = orig_reach
+assert app._calib_phase in (0, 1, 2)
+app._closing = False
+print("Calibration closing guard OK")
+
+print("--- TOAST CLEANUP + TIMER EXIT + HTTP CLOSE (v5.6.0) ---")
+# Park a live toast so on_close has something to destroy.
+app._show_toast("TEST", "toast to clean up", duration_ms=60000)
+assert app._toast_refs, "toast was not tracked"
+timer_thread_ref = app._timers_thread
+assert timer_thread_ref is not None and timer_thread_ref.is_alive()
+# Park a fake engine so on_close's engine.stop() path is exercised.
+close_engine = FakeEngine()
+close_engine._running = True
+close_engine.stopped = 0
+app._hand_engine = close_engine
+
+print("=== ALL v5.6.0 TESTS PASSED ===")
+app.on_close()  # real shutdown: engine.stop, toast cleanup, timer join, destroy
+
+# Re-tag the final success line printed above: on_close has now run.
+assert app._closing is True
+assert close_engine.stopped == 1, "on_close did not stop the hand engine"
+assert app._hand_engine is None
+assert getattr(app, "_toast_refs", []) == [], "toasts left after close"
+assert not (timer_thread_ref.is_alive()), "timer thread still alive after close"
+print("clean shutdown checks OK")
+
+# ----------------------------------------------------------------------
 # v5.4.1 NEW: real webcam lifecycle (skips cleanly when no camera exists)
 # ----------------------------------------------------------------------
 print("--- REAL WEBCAM START/STOP/RESTART (v5.4.1 regression) ---")
@@ -651,7 +719,8 @@ else:
 print("Real webcam lifecycle OK")
 
 # ----------------------------------------------------------------------
-# Cleanup: restore config, real shutdown.
+# Cleanup: restore config (on_close already ran in the v5.6.0 section;
+# it is a guarded no-op a second time).
 # ----------------------------------------------------------------------
 app.config["macro_mode"] = bool(orig_macro_mode)
 app.config["touchpad_mode"] = bool(orig_touchpad_mode)
@@ -659,5 +728,4 @@ app.config["hand_mode"] = orig_hand_mode
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.5.0 TESTS PASSED ===")
-app.on_close()  # real shutdown: stops tray, hotkey, threads
+print("=== ALL v5.6.0 TESTS PASSED ===")

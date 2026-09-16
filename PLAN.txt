@@ -5,7 +5,7 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v5.5.0 works end-to-end (voice, waveform UI, timers, clipboard history,
+STATUS: v5.6.0 works end-to-end (voice, waveform UI, timers, clipboard history,
 screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
 log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
 live tuning, chained commands, wake word aliases, timer toast popups,
@@ -19,10 +19,15 @@ v5.5.0 added thread-safety hardening (spiral 2): every tkinter touch now
 happens on the GUI thread. Voice, tray and hotkey workers marshal their UI
 work through the event queue (_gui_call), _append_log is worker-safe, and
 hand-engine events are epoch-tagged so stale events from an old engine
-instance can never flip the UI. hand_cursor.py itself is on v1.8.0.
+instance can never flip the UI. v5.6.0 added clean shutdown (spiral 3):
+on_close signals the timer runner to exit, destroys leftover toast popups,
+closes the Gemini HTTP session, and every root.after() loop (queue poller,
+clipboard watcher, calibration wizard) stops re-scheduling the moment
+_closing is set - no callback can touch a destroyed window.
+hand_cursor.py itself is on v1.8.0.
 
 -------------------------------------------------------------------------------
-1) CURRENT ARCHITECTURE (v5.5)
+1) CURRENT ARCHITECTURE (v5.6)
 -------------------------------------------------------------------------------
 - voice_app.py   ~3500 lines : tkinter GUI + controller.
   Threads:  "stt"    (speech -> text, Google Web API)
@@ -54,6 +59,10 @@ Command branches: app launch, browser, window, system keys, volume,
    commands, tray and hotkey callbacks can no longer touch Tk from a worker
    thread; _append_log is thread-safe; hand-engine callbacks carry an epoch
    so events from an old engine instance are dropped before reaching the UI.
+   v5.6: CLEAN SHUTDOWN - on_close() signals the timer runner (flag) and the
+   TTS sentinel, joins the timer thread briefly, destroys leftover toasts,
+   closes the reused requests.Session (Gemini), and the poller/clipboard/
+   calibration after() loops bail as soon as _closing is set.
    v5.4: TOUCHPAD - TOUCHPAD button (or voice "touchpad mode") switches the
    engine to a RELATIVE mouse: the pointer follows accumulated hand-center
    deltas, like a laptop trackpad, so it never teleports and feels like a
@@ -159,6 +168,6 @@ PHASE D - GESTURE X / PRODUCTISATION
 4) NEXT SHIPMENT (playbook for continuing)
   1. Phase D: two-hand support (primary pointer + modifier hand).
   2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
-  3. Run full smoke suite (py_compile + test_v56.py), update QUICK_START.txt
+  3. Run full smoke suite (py_compile + test_v57.py), update QUICK_START.txt
      + this PLAN, then git add -A && commit && push to origin/main.
 ===============================================================================

@@ -70,6 +70,12 @@
    work through the event queue (_gui_call), _append_log is worker-safe,
    and hand-engine events are tagged with an epoch so a stale "started /
    stopped" event from a previous engine instance can never flip the UI.
+ * CLEAN SHUTDOWN (v5.6.0): on_close now gives worker threads a real exit
+   signal (timer loop flag, TTS sentinel already ended), joins the timer
+   thread briefly, destroys leftover toast popups, closes the Gemini HTTP
+   session, and every after() loop (queue poller, clipboard watcher,
+   calibration wizard) stops re-scheduling the moment _closing is set - so
+   no callback can touch a destroyed window.
  * EXTRA UTILITIES - time/date, quick notes, calculator, sites, power:
  *    "what time is it" / "what date is it today"
  *    "take a note: <text>" -> appends to voc_notes.txt
@@ -120,7 +126,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.5.0
+VERSION   : 5.6.0
 ================================================================================
 """
 
@@ -530,7 +536,7 @@ class VoiceControlApp:
         # Timer / reminder state (worker thread guarded list).
         self._timers = []
         self._timers_lock = threading.Lock()
-        self._timers_event = threading.Event()
+        self._timers_active = True     # cleared on shutdown so the runner exits
         self._timers_thread = threading.Thread(
             target=self._timer_runner, name="timers", daemon=True)
         self._timers_thread.start()
@@ -1299,7 +1305,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             except Exception as exc:
                 # Never let one bad message kill the whole GUI poller.
                 self._append_log(f"[!] Message error ({kind}): {exc}")
-        self.root.after(30, self._poll_queue)
+        if not self._closing:
+            self.root.after(30, self._poll_queue)
 
     def _apply_autoselect(self, index):
         """Select the device chosen by AUTO-BEST on the GUI thread."""
@@ -1317,6 +1324,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
     # ------------------------------------------------------------------
     def _watch_clipboard(self):
         """Poll the OS clipboard and remember new text entries (max 8)."""
+        if self._closing:
+            return
         if not getattr(self, "_ready", False):
             try:
                 self.root.after(800, self._watch_clipboard)
@@ -1413,7 +1422,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
     # ------------------------------------------------------------------
     def _timer_runner(self):
         """Every second check for timers/reminders that have fired."""
-        while True:
+        while self._timers_active:
             try:
                 due = []
                 with self._timers_lock:
@@ -2933,6 +2942,8 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         Also shows the live normalised hand size during calibration so the
         user gets instant visual feedback on the "rest vs reach" poses.
         """
+        if self._closing:
+            return
         try:
             if self._calibrating:
                 phase_name = "REST" if self._calib_phase == 1 else "REACH"
@@ -2951,7 +2962,10 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                     self._calib_phase = 2
                     self._calib_samples = []
                     self._calib_target = 12
-                    self.root.after(1600, self._calibrate_finish)
+                    try:
+                        self.root.after(1600, self._calibrate_finish)
+                    except tk.TclError:
+                        return  # window closing - abandon calibration
                     self._append_log("[CALIB] Now REACH toward your screen "
                                      "and HOLD for 2 seconds...")
                 elif self._calib_phase == 2:
@@ -2959,7 +2973,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
 
     def _calibrate_reach(self):
         """Two-phase calibration: rest-size, then reach-size."""
-        if self._calibrating:
+        if self._calibrating or self._closing:
             return
         self._calibrating = True
         self._calib_phase = 1
@@ -2968,10 +2982,17 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         self.calib_btn.config(text="CALIBRATING...", state="disabled")
         self._append_log("[CALIB] Phase 1: put your hand in a RESTING "
                          "position (e.g. on your lap). Collecting...")
-        self.root.after(2500, self._calibrate_check)
+        self._calib_schedule_next()
+
+    def _calib_schedule_next(self):
+        """Schedule the next calibration step (GUI thread only)."""
+        try:
+            self.root.after(2500, self._calibrate_check)
+        except tk.TclError:
+            pass  # window closing - calibration simply stops
 
     def _calibrate_check(self):
-        if not self._calibrating or self._calib_phase != 1:
+        if not self._calibrating or self._calib_phase != 1 or self._closing:
             return
         if self._calib_samples:
             self._calib_rest = list(self._calib_samples)
@@ -2980,14 +3001,21 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self._calib_target = 12
             self._append_log("[CALIB] Phase 2: REACH toward the screen "
                              "and HOLD for 2 seconds...")
-            self.root.after(2500, self._calibrate_finish)
+            self._calib_schedule_finish()
         else:
             self._append_log("[CALIB] No hand detected. Start the hand "
                              "cursor first, then try again.")
             self._calibrate_done()
 
+    def _calib_schedule_finish(self):
+        """Schedule the calibration finish step (GUI thread only)."""
+        try:
+            self.root.after(2500, self._calibrate_finish)
+        except tk.TclError:
+            pass  # window closing - calibration simply stops
+
     def _calibrate_finish(self):
-        if not self._calibrating:
+        if not self._calibrating or self._closing:
             return
         rest_samples = [s for s in self._calib_rest if s < 0.35]
         reach_samples = [s for s in self._calib_samples if s >= 0.25]
@@ -3527,13 +3555,20 @@ text="Say: Open <app> | Type <text> | Search <query> | "
     # Shutdown
     # ------------------------------------------------------------------
     def on_close(self):
-        """Clean up threads and close the window (real shutdown)."""
+        """Clean up threads and close the window (real shutdown).
+
+        Safe to call once (guarded by _closing). Worker threads are all
+        daemons, but they are given explicit exit signals where one exists
+        (listening event, timer-active flag, TTS sentinel) so nothing keeps
+        on running or retrying after the window is gone.
+        """
         if self._closing:
             return
         self._closing = True
         self._listening_event.clear()
         with self._timers_lock:
             self._timers = []
+            self._timers_active = False
         save_config(self.config)
         # Close trainer and disable training before stopping the engine.
         if self._train_window is not None:
@@ -3575,6 +3610,27 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self._tts_queue.put(None)  # stop the persistent TTS thread
         except Exception:
             pass
+        # Dismiss any toast popups still on screen.
+        for toast in getattr(self, "_toast_refs", []) or []:
+            try:
+                toast.destroy()
+            except (tk.TclError, AttributeError):
+                pass
+        self._toast_refs = []
+        # Give the timer runner a moment to see its exit flag.
+        timers_thread = getattr(self, "_timers_thread", None)
+        if timers_thread is not None and timers_thread.is_alive():
+            try:
+                timers_thread.join(timeout=1.5)
+            except Exception:
+                pass
+        # Close the reused HTTP connection pool (Gemini calls).
+        http = getattr(self, "_http", None)
+        if http is not None:
+            try:
+                http.close()
+            except Exception:
+                pass
         self.root.destroy()
 
 
