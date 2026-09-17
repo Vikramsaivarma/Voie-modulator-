@@ -7,19 +7,21 @@ the coding assistant had when this session ended.
 WHAT "KEEP IN A TEXT" MEANS FOR YOU
 - The app itself is fully saved/committed/pushed (git clean = no pending work).
 - Tomorrow, open this file, hand it to the assistant as context, and say
-  "continue the roadmap" (next item = TWO-HAND SUPPORT, see bottom).
+  "continue the roadmap" (next item = PACKAGING, see bottom).
 
 ===============================================================================
 1) OBJECTIVE
 ===============================================================================
 Ship the remaining Phase D roadmap in small, tested batches for the Windows
 "super app" (voice_app.py + hand_cursor.py) in C:\Users\Jo\Desktop\voicemodule.
-Latest shipped batch: v5.8.0 + hand_cursor v1.9.0 (spiral 5 - TWO-HAND
-SUPPORT, the last Phase D feature): the engine tracks up to 2 hands; the
-hand nearest the camera drives the cursor exactly as before, and a second
-hand only ever holds a keyboard modifier (open=Ctrl, fist=Shift, peace=Alt,
-three=Win), debounced, non-sticking, released on loss/disarm/off/stop. GUI
-"2 Hands" checkbox + config two_hand (default True). Previous spirals:
+Latest shipped batch: v5.9.0 + hand_cursor v1.9.1 (spiral 6 - two-hand polish,
+privacy, and "only works while open"): voice commands "two hand mode on/off"
+toggle the modifier hand; the modifier pose->key mapping is remappable via the
+two_hand_keys config (merged over open=Ctrl, fist=Shift, peace=Alt, three=Win);
+a one-time first-run wizard shows the privacy notice; and hiding the window
+(tray, X button, "minimize to tray", taskbar minimize) now PAUSES the mic and
+STOPS the webcam engine so the camera LED goes out, resuming exactly what was
+running when shown again. Previous spirals: v5.8.0 two-hand support (spiral 5),
 v5.7.0 settings persistence, v5.6.0 clean shutdown, v5.5.0 GUI-thread
 marshalling, hand_cursor v1.8.0 gesture safety. Hard rule: the Gemini API
 key stays LOCAL ONLY in the gitignored voc_config.json - it must never
@@ -34,7 +36,7 @@ gitignored.
   webcam). Zero strays must remain after a test run.
 - Repo: C:\Users\Jo\Desktop\voicemodule, branch main, remote:
   https://github.com/Vikramsaivarma/Voie-modulator-.git
-- Versions CURRENTLY on disk/pushed: voice_app.py 5.8.0, hand_cursor.py 1.9.0.
+- Versions CURRENTLY on disk/pushed: voice_app.py 5.9.0, hand_cursor.py 1.9.1.
 - Pushed history:
   9491bf9 v5.0 full-scale (beeps, TTS profiles, Gemini memory, cursor vision,
           log persistence, autostart)
@@ -50,21 +52,29 @@ gitignored.
   05a2611 v5.5.0 GUI thread marshalling (spiral 2)
   d7d8dfd v5.6.0 clean-shutdown hardening (spiral 3)
   1d85228 v5.7.0 settings persistence + voice preselect (spiral 4)
-  <latest> v5.8.0 + hand_cursor v1.9.0 two-hand modifier mode (spiral 5) - THIS batch
+  b2e6fee v5.8.0 + hand_cursor v1.9.0 two-hand modifier mode (spiral 5)
+  <latest> v5.9.0 + hand_cursor v1.9.1 two-hand polish + privacy wizard +
+          only-works-while-open (spiral 6) - THIS batch
 - Deps (requirements.txt): speech_recognition, pyttsx3, pyautogui, pyaudio,
   opencv, mediapipe, pillow, requests, pystray, keyboard.
 
 ===============================================================================
-3) CURRENT ARCHITECTURE (v5.8.0)
+3) CURRENT ARCHITECTURE (v5.9.0)
 ===============================================================================
-- voice_app.py ~3600 lines: tkinter GUI + controller. Threads: stt, tts,
+- voice_app.py ~3900 lines: tkinter GUI + controller. Threads: stt, tts,
   timers. GUI thread: clipboard watcher, waveform meter, hand preview, log,
   calibration sampler, tray. Config voc_config.json (gitignored).
   Cards: VOICE, WAVEFORM, HAND CURSOR (SENS/SCROLL sliders, CALIBRATE REACH
   + live size readout, TRAIN GESTURES, DRAW MACROS, TOUCHPAD, Beep), HEARD
   banner, CLIPBOARD card (click-to-paste), ACTIVITY LOG, status bar.
-  Tray (pystray) + hotkey ctrl+alt+v + X-button hides to tray; real shutdown
-  is on_close() guarded by self._closing.
+  Tray (pystray, _start_tray/_stop_tray) + hotkey ctrl+alt+v + X-button
+  hides to tray; real shutdown is on_close() guarded by self._closing.
+  Only-works-while-open (v5.9.0): root <Unmap>/<Map> bindings call
+  _suspend_background_work()/_resume_background_work(); hiding stops the
+  mic (_listening_event) and the webcam engine (stop_hand_cursor) and
+  remembers _was_listening/_hand_was_running; start_hand_cursor() refuses to
+  run while _hidden_suspended is True. _hide_to_tray() is the single
+  hide path (X button, tray toggle, voice "minimize to tray").
   Thread-safety (v5.5.0): _gui_call() marshals worker->GUI work to the
   event queue so voice, tray, hotkey and engine threads can never touch Tk
   directly; _append_log is worker-safe (posts back to GUI thread when called
@@ -83,6 +93,14 @@ gitignored.
   runs it via handle_command on a daemon thread.
 
 - hand_cursor.py: MediaPipe engine (daemon). Landmark constants defined.
+  v1.9.0 two-hand support (spiral 5): max_num_hands=2 (1 when two_hand off);
+  the hand with the largest normalised size is the pointer, the other holds
+  a modifier key via its own debounce latch (_mod_pose/_mod_frames/_mod_key/
+  _mod_lost_since) using DEFAULT_MOD_KEYS. v1.9.1 (spiral 6): the pose->key
+  map is configurable - HandCursorEngine(mod_keys=...) / set_mod_keys(dict)
+  merges over DEFAULT_MOD_KEYS. Modifier keys never share mutable gesture
+  state with the pointer and are always released on pose change / hand loss
+  / disarm / two_hand off / stop.
   v1.8.0 engine-correctness + safety fixes (spiral 1): _reset_gesture_state
   helper resets mode/candidate/pinch on disarm/loss/training; _press_button
   guards on running+training; macro mode uses _macro_armed stroke-in-progress
@@ -132,22 +150,36 @@ DONE:
   + tested (test_v59.py), committed, pushed: 2-hand tracking, nearest hand
   = pointer, second hand holds Ctrl/Shift/Alt/Win (debounced, non-sticking,
   always released), GUI "2 Hands" checkbox + two_hand config (default True).
+- v5.9.0 two-hand polish + privacy wizard + only-works-while-open (spiral 6)
+  + hand_cursor v1.9.1 implemented + tested (test_v60.py), committed, pushed:
+  voice "two hand mode on/off" (+ "second hand"/"modifier hand") with the
+  branch ordered BEFORE "hand cursor" so "two hand mode off" is not mistaken
+  for stopping the cursor; two_hand_keys config remaps the modifier poses
+  (engine merged over DEFAULT_MOD_KEYS); first-run privacy wizard
+  (_show_first_run_wizard/_close_first_run_wizard, config privacy_notice_shown
+  default False); hide-to-tray/minimize now pauses the mic and stops the
+  webcam (camera LED off) and restores the prior state on show; new
+  _stop_tray() helper (used by on_close too, so the test process no longer
+  hangs on the pystray thread).
 - ALL local tests currently pass: "C:\Users\Jo\anaconda3\python.exe"
-  test_v59.py  -> "=== ALL v5.8.0 TESTS PASSED ===" and 0 stray python procs.
+  test_v60.py  -> "=== ALL v5.9.0 TESTS PASSED ===" and 0 stray python procs.
 - git working tree CLEAN, main == origin/main (nothing pending).
 - install.bat verifies core imports and pystray/keyboard (warn-only).
-- PLAN.txt + QUICK_START.txt updated to v5.5.0.
+- PLAN.txt + QUICK_START.txt + this HANDOFF updated to v5.9.0.
 
 OPEN / NEXT:
-- Next spiral batches (spiral model - SPIRAL 6 = packaging/UX polish:
-  PyInstaller single exe, first-run wizard, privacy notice; remaining
-  polish items: voice commands for two-hand toggle, premature-exit prompts).
+- Next spiral (spiral 7) = PACKAGING: PyInstaller single-exe build + install.bat
+  update; the first-run wizard + privacy notice already ship in v5.9.0, so the
+  exe just needs to bundle mediapipe/pyttsx3 data files and verify launch +
+  camera release on close.
+- Remaining polish item: premature-exit prompts.
 - TODO list in PLAN.txt "4) NEXT SHIPMENT":
-  1. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
-  2. Two-hand polish: voice commands for two_hand on/off, optional mod-key
-     remap in config; note that max_num_hands stays 1 when two_hand is off.
+  1. Packaging: PyInstaller single exe; verify it launches and releases the
+     camera on close (first-run wizard/privacy already shipped).
+  2. Two-hand edge cases: any remaining remap/config polish (max_num_hands
+     stays 1 when two_hand is off).
   3. After each batch: py_compile voice_app.py hand_cursor.py, run the
-     current smoke suite (test_v59.py -> create test_v60.py, delete the
+     current smoke suite (test_v60.py -> create test_v61.py, delete the
      old one), update QUICK_START.txt + PLAN.txt + this HANDOFF, then
      git add -A && commit && push to origin/main.
 - Conventions for a new batch/version:
@@ -169,30 +201,27 @@ OPEN / NEXT:
 ===============================================================================
 1. Kill strays:  Get-Process python*,pythonw -EA SilentlyContinue | Stop-Process -Force
 2. & "C:\Users\Jo\anaconda3\python.exe" -m py_compile voice_app.py hand_cursor.py
-3. & "C:\Users\Jo\anaconda3\python.exe" test_v59.py   (or current test file)
+3. & "C:\Users\Jo\anaconda3\python.exe" test_v60.py   (or current test file)
 4. Confirm 0 stray python processes after.
 5. git add -A; git commit -m "v5.x: <short feature>"; git push origin main.
 
 ===============================================================================
-6) TWO-HAND SUPPORT SKETCH (tomorrow's batch - not yet started)
+6) NEXT BATCH SKETCH - PACKAGING (spiral 7, not yet started)
 ===============================================================================
-Goal from PLAN: "Two-hand support (left = pointer, right = modifiers)."
-Work-in-progress thoughts to guide you (NOT implemented):
-- Engine currently uses max_num_hands=1 and results.multi_hand_landmarks[0].
-  For two hands: set max_num_hands=2, read results.multi_handedness to tell
-  Left/Right apart (each entry has a label 'Left'/'Right' and classification
-  score). mediapipe hands face the camera, so handedness mirrors real-world
-  laterality; pick the pointer hand by whichever landing you want (e.g. the
-  one on screen-left) and use handedness to assign the modifier role.
-- Modifier semantics are arbitrary until YOU decide; a minimal, safe first
-  version: the modifier hand adds a BOOLEAN modifier (e.g. "both hands need
-  to be visible, pointer hand does everything, modifier hand simply must
-  be open for the pointer to CLICK" OR "modifier hand open toggles on the
-  fly to a secondary action set"). Pick ONE, implement, and write synthetic
-  landmarks for both hands (21 landmarks each) in the test.
-- Interference guard: when both hands are present, only the pointer hand
-  drives the mouse; buttons stay gated by STABLE_FRAMES so a wobbling
-  second hand can never click.
+Goal from PLAN: "Installer (PyInstaller single exe) + auto-update check."
+Notes to guide you (NOT implemented):
+- First-run wizard + privacy notice ALREADY ship in v5.9.0, so the exe only
+  needs to bundle everything and launch cleanly.
+- MediaPipe ships .tflite/.binarypb data files; a plain one-file PyInstaller
+  build will miss them unless collected. Use a spec with
+  collect_data_files("mediapipe") (and add mediapipe to hiddenimports). pyttsx3
+  needs its driver module; opencv/pillow usually just work.
+- Consider --noconsole (windowed), an .ico, and version metadata. install.bat
+  currently verifies imports - extend it to also build/refresh the exe.
+- Test after building: launch the exe, confirm the GUI + a real camera
+  start/stop (LED off) + mic, then quit and confirm no lingering process.
+- Keep the smoke suite as the gate: build must not regress the current
+  "=== ALL v5.9.0 TESTS PASSED ===" result on the source tree.
 
 ===============================================================================
 (END OF HANDOFF - you are up to date with the session.)

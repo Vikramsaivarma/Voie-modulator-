@@ -5,7 +5,7 @@ Goal: turn voice_app.py + hand_cursor.py into a polished hands-free "digital
 assistant" that feels natural: talk to it, reach toward the screen to use the
 mouse, and let it handle routine computer tasks.
 
-STATUS: v5.8.0 works end-to-end (voice, waveform UI, timers, clipboard history,
+STATUS: v5.9.0 works end-to-end (voice, waveform UI, timers, clipboard history,
 screen vision, cursor vision, Gemini memory, TTS voice profiles, click beeps,
 log persistence, autostart, math, notes, sites, power, reach-gated air cursor,
 live tuning, chained commands, wake word aliases, timer toast popups,
@@ -37,10 +37,19 @@ keyboard modifier (open=Ctrl, fist=Shift, peace=Alt, three=Win). The
 modifier pose is debounced, old keys are released before a new one presses,
 and the key is always released on hand loss / pointer disarm / two_hand-off
 / engine stop. Config: two_hand (default True) + live "2 Hands" checkbox.
-hand_cursor.py itself is on v1.9.0.
+v5.9.0 added two-hand polish + privacy + "only works while open" (spiral 6,
+hand_cursor v1.9.1): voice commands "two hand mode on/off" toggle the
+modifier mode; the pose->key mapping is remappable via the two_hand_keys
+config (merged over the open=Ctrl fist=Shift peace=Alt three=Win defaults);
+a one-time first-run wizard shows the privacy notice (local processing,
+Gemini only on request, settings/logs stay beside the app); and hiding the
+window (tray, X button, "minimize to tray", taskbar minimize) now PAUSES
+the microphone and STOPS the webcam engine so the camera LED goes out,
+resuming exactly what was running when the window is shown again.
+hand_cursor.py itself is on v1.9.1.
 
 -------------------------------------------------------------------------------
-1) CURRENT ARCHITECTURE (v5.8)
+1) CURRENT ARCHITECTURE (v5.9)
 -------------------------------------------------------------------------------
 - voice_app.py   ~3500 lines : tkinter GUI + controller.
   Threads:  "stt"    (speech -> text, Google Web API)
@@ -87,6 +96,13 @@ v5.6: CLEAN SHUTDOWN - on_close() signals the timer runner (flag) and the
     hand holds a modifier key (open=Ctrl, fist=Shift, peace=Alt, three=Win)
     that is debounced, non-sticking and always released on loss/disarm/off;
     "2 Hands" checkbox toggles it live (config two_hand, default True).
+    v5.9: TWO-HAND POLISH + PRIVACY + ONLY-WORKS-WHEN-OPEN (hand_cursor
+    v1.9.1) - voice "two hand mode on/off"; two_hand_keys config remaps the
+    modifier poses (merged over the defaults); first-run wizard shows the
+    privacy notice once (privacy_notice_shown); hiding the window pauses
+    the mic + stops the webcam engine (camera LED off) and showing it
+    resumes the prior state (_hidden_suspended / _was_listening /
+    _hand_was_running).
    v5.4: TOUCHPAD - TOUCHPAD button (or voice "touchpad mode") switches the
    engine to a RELATIVE mouse: the pointer follows accumulated hand-center
    deltas, like a laptop trackpad, so it never teleports and feels like a
@@ -181,8 +197,10 @@ PHASE D - GESTURE X / PRODUCTISATION
       minimize, settings, close tab, play or pause, mute, maximize.
       $1-style recognizer in hand_cursor; DRAW MACROS toggle + voice.
       Actions are normal voice commands (macro_actions config to remap). - v5.3.
+  [x] Installer prep: first-run wizard + privacy notice (shipped in v5.9.0
+      as the in-app wizard; installer/privacy text also surfaced there).
   [ ] Installer (PyInstaller single exe) + auto-update check.
-  [ ] Packaging: signed build, first-run wizard, privacy notice.
+  [ ] Packaging: signed build.
 
 -----------------------------------------------------------------------------
 3) TESTING & QUALITY BAR  (every release)
@@ -196,8 +214,10 @@ PHASE D - GESTURE X / PRODUCTISATION
 
 -----------------------------------------------------------------------------
 4) NEXT SHIPMENT (playbook for continuing)
-  1. Phase D: two-hand support (primary pointer + modifier hand).
-  2. Packaging: PyInstaller single exe, first-run wizard, privacy notice.
-  3. Run full smoke suite (py_compile + test_v59.py), update QUICK_START.txt
+  1. Packaging: PyInstaller single exe (first-run wizard + privacy notice
+     already shipped in v5.9.0); verify the built exe launches and releases
+     the camera on close.
+  2. Two-hand polish pass: any remaining remap/config edge cases.
+  3. Run full smoke suite (py_compile + test_v60.py), update QUICK_START.txt
      + this PLAN, then git add -A && commit && push to origin/main.
 ===============================================================================

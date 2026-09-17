@@ -1,17 +1,19 @@
-"""Smoke-test suite for VoiceControlApp v5.8.0 (two-hand modifier mode).
+"""Smoke-test suite for VoiceControlApp v5.9.0 (two-hand polish + wizard).
 
-Supersedes test_v58.py: keeps all v5.2..v5.7.0 regression checks and adds
-the v5.8.0 / hand_cursor v1.9.0 coverage:
+Supersedes test_v59.py: keeps all v5.2..v5.8.0 regression checks and adds
+the v5.9.0 / hand_cursor v1.9.1 coverage:
 
-  * the hand engine detects up to 2 hands; the nearest hand drives the
-    cursor and the second hand only holds a modifier key (open=Ctrl,
-    fist=Shift, peace=Alt, three=Win).
-  * the modifier key is debounced (STABLE_FRAMES), an old key is released
-    before a new one is pressed, and the key is always released on hand
-    loss / pointer disarm / two_hand off / engine stop.
-  * the app default enables two_hand, the "2 Hands" checkbox toggles it
-    live + persists it, and start_hand_cursor passes it into the engine.
-  * (kept) v5.6.0 on_close teardown, v5.7.0 settings persistence.
+  * the modifier pose->key mapping is remappable (two_hand_keys /
+    engine.set_mod_keys merges over the open=Ctrl fist=Shift peace=Alt
+    three=Win defaults).
+  * "two hand mode on/off" voice commands toggle the modifier mode.
+  * a first-run wizard shows the one-time privacy notice and marks it
+    acknowledged (privacy_notice_shown) - never shown again.
+  * the app only works while its window is open: hiding it pauses the
+    microphone and stops the webcam engine (camera LED off), the start
+    path is blocked while hidden, and showing it resumes exactly the
+    state that was running before.
+  * (kept) v5.8.0 two-hand engine tests, v5.6.0 teardown, v5.7.0 settings.
 """
 import os
 import sys
@@ -32,6 +34,11 @@ root = tk.Tk()
 root.withdraw()
 app = va.VoiceControlApp()
 root.update()
+# First-run wizard may auto-show once (privacy notice) - dismiss it so the
+# rest of the suite is unaffected; the wizard itself is tested later.
+if app._wizard is not None:
+    app._close_first_run_wizard()
+    root.update()
 
 # Self-heal: interrupted runs may have left macro/touchpad/hand_mode on.
 # Remember the originals, force safe defaults, restore them in the cleanup.
@@ -46,6 +53,11 @@ app.config["hand_mode"] = "off"     # stop any GUI auto-start of the webcam
 va.save_config(app.config)
 assert app.config.get("macro_mode", None) is False
 assert app.config.get("touchpad_mode", None) is False
+# The suite runs with a withdrawn root; the "hidden window pauses work"
+# handler may have fired, so clear it to emulate a visible window.
+app._hidden_suspended = False
+app._was_listening = False
+app._hand_was_running = False
 print("Mode config reset (originals saved) OK")
 
 
@@ -227,6 +239,11 @@ root.update()
 assert restore_called == [True], (
     f"tray toggle did not run on the GUI thread: {restore_called!r}")
 app._restore_window = orig_restore
+# The hide toggle above paused background work; the fake restore skipped
+# the real deiconify/resume, so clear the flag for the rest of the suite.
+app._hidden_suspended = False
+app._was_listening = False
+app._hand_was_running = False
 print("Tray toggle marshalling OK")
 
 print("--- HOTKEY RESTORE MARSHALLED ---")
@@ -484,6 +501,8 @@ img = app._tray_image()
 assert img is not None
 app._start_tray()
 assert app._tray_icon is not None
+app._stop_tray()
+assert app._tray_icon is None, "tray icon did not stop"
 print("Tray icon + hotkey started OK")
 
 print("--- AUTOSTART REGISTRY (v5.2 regression) ---")
@@ -726,9 +745,59 @@ finally:
     hc.pyautogui.keyUp = orig_ku_k
 print("Two-hand loss/disarm/off key release OK")
 
+print("--- TWO-HAND REMAPPABLE MODIFIER KEYS (v1.9.1) ---")
+engine._armed = True
+engine._driver_mode = "cursor"
+engine.two_hand = True
+# set_mod_keys MERGES over the defaults; untouched poses keep defaults.
+engine.set_mod_keys({"fist": "ctrl"})
+try:
+    engine._release_modifier()
+    kd.clear()
+    ku.clear()
+    hc.pyautogui.keyDown = lambda k: kd.append(k)
+    hc.pyautogui.keyUp = lambda k: ku.append(k)
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["fist"])
+    assert kd == ["ctrl"], f"override fist->ctrl failed: {kd}"
+    assert engine._mod_key == "ctrl"
+    # untouched poses keep their defaults
+    engine._release_modifier()
+    kd.clear()
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["open"])
+    assert kd == ["ctrl"], f"default open->ctrl lost after remap: {kd}"
+    engine._release_modifier()
+    kd.clear()
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["peace"])
+    assert kd == ["alt"], f"default peace->alt lost after remap: {kd}"
+    engine._release_modifier()
+    kd.clear()
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["three"])
+    assert kd == ["win"], f"default three->win lost after remap: {kd}"
+    # a second override replaces the first for that pose only
+    engine.set_mod_keys({"open": "alt"})
+    engine._release_modifier()
+    kd.clear()
+    for _ in range(hc.STABLE_FRAMES + 1):
+        engine._update_modifier(poses["open"])
+    assert kd == ["alt"], f"re-override open->alt failed: {kd}"
+    engine._release_modifier()
+    engine.set_mod_keys(None)    # restore defaults
+finally:
+    hc.pyautogui.keyDown = orig_kd_k
+    hc.pyautogui.keyUp = orig_ku_k
+print("Two-hand remappable modifier keys OK")
+
 print("--- TWO-HAND APP CONFIG + ENGINE WIRING (v5.8.0) ---")
 assert va.DEFAULT_CONFIG.get("two_hand") is True, \
     "two_hand should default to ON"
+assert va.DEFAULT_CONFIG.get("two_hand_keys") == {}, \
+    "two_hand_keys should default to empty dict"
+assert va.DEFAULT_CONFIG.get("privacy_notice_shown") is False, \
+    "privacy_notice_shown should default to False"
 assert app.two_hand_var.get() is bool(app.config.get("two_hand", True))
 saved_calls2 = []
 orig_save2 = va.save_config
@@ -772,6 +841,13 @@ app._hand_engine = None
 app.start_hand_cursor()
 assert made[-1]["two_hand"] is True, \
     f"engine built with two_hand={made[-1].get('two_hand')}"
+app.config["two_hand_keys"] = {"fist": "alt"}
+va.HandCursorEngine = lambda **kw: (made.append(kw) or CapturingEngine(**kw))
+app._hand_engine = None
+app.start_hand_cursor()
+assert made[-1]["mod_keys"] == {"fist": "alt"}, \
+    f"engine built with mod_keys={made[-1].get('mod_keys')}"
+app.config["two_hand_keys"] = {}
 va.HandCursorEngine = orig_factory
 if app._hand_engine is not None:
     try:
@@ -781,6 +857,106 @@ if app._hand_engine is not None:
 app._hand_engine = None
 app.start_hand_cursor = lambda: None
 print("Two-hand app config + engine wiring OK")
+
+# ----------------------------------------------------------------------
+# v5.9.0 NEW: two-hand voice commands + first-run wizard
+# ----------------------------------------------------------------------
+print("--- TWO-HAND VOICE COMMANDS (v5.9.0) ---")
+# Stand up a minimal fake engine so _on_two_hand_toggle can apply live.
+fake_th = FakeEngine()
+fake_th.two_hand = True
+fake_th.set_two_hand = lambda v: setattr(fake_th, "two_hand", v)
+app._hand_engine = fake_th
+app.two_hand_var.set(True)
+app.handle_command = va.VoiceControlApp.handle_command.__get__(app,
+                                                               va.VoiceControlApp)
+app.handle_command("two hand mode off")
+assert app.two_hand_var.get() is False, "voice 'two hand mode off' failed"
+assert app.config["two_hand"] is False
+app.handle_command("two hand mode on")
+assert app.two_hand_var.get() is True, "voice 'two hand mode on' failed"
+app.handle_command("second hand off")
+assert app.two_hand_var.get() is False, "voice 'second hand off' failed"
+app.handle_command("second hand on")
+assert app.two_hand_var.get() is True, "voice 'second hand on' failed"
+app.handle_command("modifier hand off")
+assert app.two_hand_var.get() is False, "voice 'modifier hand off' failed"
+app.handle_command("modifier hand on")
+assert app.two_hand_var.get() is True, "voice 'modifier hand on' failed"
+app.handle_command("two hand")
+app.two_hand_var.set(True)     # plain toggle path leaves it changed
+app._hand_engine = None
+print("Two-hand voice commands OK")
+
+print("--- FIRST-RUN WIZARD (v5.9.0) ---")
+orig_flag = bool(app.config.get("privacy_notice_shown", False))
+app.config["privacy_notice_shown"] = False
+app._wizard = None
+app._show_first_run_wizard()
+root.update()
+assert app._wizard is not None, "wizard Toplevel did not open"
+win = app._wizard
+assert "Welcome" in str(win.title())
+app._close_first_run_wizard()
+assert app._wizard is None, "wizard did not close"
+assert app.config.get("privacy_notice_shown") is True, \
+    "privacy_notice_shown was not set"
+# Second call must be a no-op (wizard already acknowledged).
+app._wizard = None
+app._show_first_run_wizard()
+root.update()
+assert app._wizard is None, "wizard opened when already acknowledged"
+# Restore the test's original flag value so on_close does not misbehave.
+app.config["privacy_notice_shown"] = orig_flag
+print("First-run wizard OK")
+
+# ----------------------------------------------------------------------
+# v5.9.0 NEW: app only works while the window is open (camera off when
+# hidden to tray / minimized).
+# ----------------------------------------------------------------------
+print("--- SUSPEND / RESUME BACKGROUND WORK (v5.9.0) ---")
+app._hidden_suspended = False
+app._was_listening = False
+app._hand_was_running = False
+susp_engine = FakeEngine()
+susp_engine._running = True
+app._hand_engine = susp_engine
+app._listening_event.set()
+resumed = {"hand": 0, "listen": 0}
+app.start_hand_cursor = lambda: resumed.__setitem__("hand",
+                                                    resumed["hand"] + 1)
+app.start_listening = lambda: resumed.__setitem__("listen",
+                                                 resumed["listen"] + 1)
+app._suspend_background_work()
+assert app._hidden_suspended is True, "hide did not set the suspend flag"
+assert susp_engine.stopped == 1, "engine was not stopped when hidden"
+assert app._hand_engine is None, "engine reference kept after hide"
+assert not app._listening_event.is_set(), "listening not cleared when hidden"
+assert app._hand_was_running is True and app._was_listening is True, \
+    "pre-hide state not remembered"
+app._resume_background_work()
+assert app._hidden_suspended is False, "show did not clear the flag"
+assert resumed == {"hand": 1, "listen": 1}, f"resume did not restore: {resumed}"
+# Suspending while already suspended must be a no-op (no double stop).
+susp_engine2 = FakeEngine()
+susp_engine2._running = True
+app._hand_engine = susp_engine2
+app._suspend_background_work()
+assert susp_engine2.stopped == 1
+app._suspend_background_work()
+assert susp_engine2.stopped == 1, "second suspend re-stopped the engine"
+app._resume_background_work()
+print("Suspend/resume background work OK")
+
+print("--- HIDDEN WINDOW BLOCKS WEBCAM START (v5.9.0) ---")
+real_start = va.VoiceControlApp.start_hand_cursor.__get__(app,
+                                                          va.VoiceControlApp)
+app._hidden_suspended = True
+app._hand_engine = None
+real_start()
+assert app._hand_engine is None, "engine started while the window is hidden"
+app._hidden_suspended = False
+print("Hidden window blocks webcam start OK")
 
 # ----------------------------------------------------------------------
 # v5.7.0 NEW: settings persistence + voice preselection + gemini fallback
@@ -836,7 +1012,7 @@ close_engine._running = True
 close_engine.stopped = 0
 app._hand_engine = close_engine
 
-print("=== ALL v5.8.0 TESTS PASSED ===")
+print("=== ALL v5.9.0 TESTS PASSED ===")
 app.on_close()  # real shutdown: engine.stop, toast cleanup, timer join, destroy
 
 # Re-tag the final success line printed above: on_close has now run.
@@ -927,4 +1103,4 @@ app.config["hand_mode"] = orig_hand_mode
 va.save_config(app.config)
 
 print()
-print("=== ALL v5.8.0 TESTS PASSED ===")
+print("=== ALL v5.9.0 TESTS PASSED ===")

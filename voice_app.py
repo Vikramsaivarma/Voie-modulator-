@@ -82,6 +82,18 @@
    cursor exactly as before. The key is debounced for STABLE_FRAMES, always
    released on pose change / hand loss / stop, and a "2 Hands" checkbox in
    the HAND CURSOR card toggles it live (persisted in voc_config.json).
+ * TWO-HAND POLISH (v5.9.0, hand_cursor v1.9.1): say "two hand mode on/off"
+   to toggle it by voice; the modifier pose->key mapping can be remapped via
+   the two_hand_keys config (merged over open=Ctrl fist=Shift peace=Alt
+   three=Win); a one-time first-run wizard now introduces the privacy
+   notice (all processing local, Gemini only when you ask, settings/logs
+   stay next to the app) and a few quick-start commands.
+ * ONLY WORKS WHILE OPEN (v5.9.0): hiding the window (tray icon, the X
+   button, "minimize to tray", or the taskbar minimize button) now PAUSES
+   the microphone and STOPS the webcam engine, so the camera LED turns off
+   whenever the app is not on screen. Showing the window again restores
+   exactly what was running before. The webcam can never auto-start while
+   the window is hidden.
  * SETTINGS PERSISTENCE (v5.7.0): camera, preview, click-beep, TTS voice,
    speech rate, hand sensitivity and scroll speed are now saved to
    voc_config.json the instant you touch them (previously they only stuck
@@ -138,7 +150,7 @@
    1. Install dependencies:   pip install -r requirements.txt
    2. Start the app:          python voice_app.py
 
-VERSION   : 5.8.0
+VERSION   : 5.9.0
 ================================================================================
 """
 
@@ -389,6 +401,8 @@ DEFAULT_CONFIG = {
     "touchpad_mode": False,     # True = hand engine starts in TOUCHPAD mode
     "touchpad_gain": 2.5,       # relative-motion speed multiplier
     "two_hand": True,           # 2nd hand holds a modifier key (ctrl/shift/alt/win)
+    "two_hand_keys": {},        # optional pose->key overrides (open/fist/peace/three)
+    "privacy_notice_shown": False,  # first-run wizard acknowledged
 }
 
 # Windows user32 functions used for window control and virtual keys.
@@ -525,6 +539,13 @@ class VoiceControlApp:
         self._tray_hotkey = None
         self._tray_hint_shown = False
 
+        # "The app only works while its window is open": when the window is
+        # hidden (tray / taskbar minimize) the microphone and the webcam are
+        # suspended (camera LED off); they resume when the window is shown.
+        self._hidden_suspended = False   # True while background work is paused
+        self._was_listening = False      # listening before hiding?
+        self._hand_was_running = False   # webcam engine running before hiding?
+
         # Hand-cursor engine state (engine itself is created lazily).
         self._hand_engine = None
         self._hand_preview_photo = None
@@ -565,6 +586,9 @@ class VoiceControlApp:
         self._train_window = None
         self._train_rows = {}
 
+        # First-run wizard (privacy notice) window state.
+        self._wizard = None
+
         # Worker thread control.
         self._listening_event = threading.Event()
         self._suspended = False        # paused via voice (still hears wake word)
@@ -597,6 +621,12 @@ class VoiceControlApp:
         self._gemini_lock = threading.Lock()
 
         self._build_gui()
+
+        # Pause the mic + webcam whenever the window is hidden (tray icon or
+        # taskbar minimize) and resume when it is shown again. This is what
+        # guarantees the camera LED is off while the app is not on screen.
+        self.root.bind("<Unmap>", self._on_window_unmap)
+        self.root.bind("<Map>", self._on_window_map)
 
         # Auto-start the webcam hand control when the app opens.
         if HAND_DEPS_OK and self.config.get("hand_mode", "on") == "on":
@@ -1007,6 +1037,11 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         self.root.after(800, self._watch_clipboard)
         # Optional: tray icon + global hotkey for minimize-to-tray.
         self.root.after(1200, self._start_tray)
+
+        # First-run wizard: one-time privacy notice (only on the very first
+        # launch, before any microphone/webcam work begins).
+        if not bool(self.config.get("privacy_notice_shown", False)):
+            self.root.after(200, self._show_first_run_wizard)
 
     # ------------------------------------------------------------------
     # Device / language helpers (GUI thread)
@@ -2068,6 +2103,26 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self._post("log", "[i] Greeting returned.")
             return
 
+        # ---- Two-hand modifier mode (must come before "hand cursor" so
+        #     "two hand mode off" does not get swallowed by the latter.) ----
+        two_hand = re.search(r"\b(two[- ]?hand|two hands|dual hand|"
+                             r"second hand|modifier hand)\b", lowered)
+        if two_hand:
+            th_on = re.search(r"\b(on|start|begin|enable|mode|activate)\b",
+                              lowered)
+            th_off = re.search(r"\b(off|stop|disable|exit|end|deactivate)\b",
+                               lowered)
+            if th_on and not th_off:
+                self._gui_call(self._toggle_two_hand, True)
+                self._speak("Two hand modifier mode on.")
+            elif th_off:
+                self._gui_call(self._toggle_two_hand, False)
+                self._speak("Two hand modifier mode off.")
+            else:
+                self._gui_call(self._toggle_two_hand)
+                self._speak("Toggling two hand modifier mode.")
+            return
+
         # ---- Hand cursor (air mouse / touch) ------------------------------
         if re.search(r"\b(hand cursor|hand mode|hand control|air cursor|"
                      r"air mouse)\b", lowered):
@@ -2269,7 +2324,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         if "minimize" in lowered or "minimise" in lowered:
             if re.search(r"\b(minimize|minimise)\b.*\b(tray|to tray)\b",
                          lowered):
-                self._gui_call(self.root.withdraw)
+                self._gui_call(self._hide_to_tray)
                 self._post("log", "[i] Minimized to system tray.")
                 self._speak("Minimized to the system tray.")
                 return
@@ -2915,6 +2970,14 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         self._append_log(f"[i] Two-hand modifier mode: {state}")
         save_config(self.config)
 
+    def _toggle_two_hand(self, enable=None):
+        """Toggle two-hand modifier mode (also the voice-command entry)."""
+        if enable is not None:
+            self.two_hand_var.set(bool(enable))
+        else:
+            self.two_hand_var.set(not bool(self.two_hand_var.get()))
+        self._on_two_hand_toggle()
+
     def _on_sensitivity_change(self, _val):
         self.config["hand_sensitivity"] = float(self.sensitivity_var.get())
         if self._hand_engine is not None:
@@ -3094,6 +3157,10 @@ text="Say: Open <app> | Type <text> | Search <query> | "
 
     def start_hand_cursor(self):
         """Create the engine (if needed) and start it. GUI/thread-safe."""
+        if self._closing or self._hidden_suspended:
+            # Never run the webcam while the window is hidden (no camera LED
+            # with the app in the tray).
+            return
         old = getattr(self, "_hand_engine", None)
         if old is not None:
             if old.is_running():
@@ -3130,6 +3197,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 arm_size=arm if arm else None,
                 disarm_size=disarm if disarm else None,
                 two_hand=bool(self.config.get("two_hand", True)),
+                mod_keys=self.config.get("two_hand_keys") or None,
             )
         except Exception as exc:
             self._post("log", f"[!] Hand cursor failed to start: {exc}")
@@ -3449,6 +3517,81 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self._train_rows.clear()
         self._append_log("[i] Gesture trainer closed.")
 
+    # ------------------------------------------------------------------
+    # First-run wizard (one-time privacy notice)
+    # ------------------------------------------------------------------
+    def _show_first_run_wizard(self):
+        """Show the one-time privacy notice + quick-start wizard.
+
+        Runs on the GUI thread shortly after the first-ever launch. Accepting
+        (or closing it) marks privacy_notice_shown so it never appears again.
+        """
+        if self._closing or self._wizard is not None:
+            return
+        if bool(self.config.get("privacy_notice_shown", False)):
+            return
+        win = tk.Toplevel(self.root)
+        self._wizard = win
+        win.title("Welcome to Voice Control (first-run notice)")
+        win.configure(bg=BG_COLOR)
+        win.geometry("520x420")
+        win.resizable(False, False)
+        win.transient(self.root)
+        win.protocol("WM_DELETE_WINDOW", self._close_first_run_wizard)
+
+        tk.Label(win, text="WELCOME - one-time notice",
+                 font=(FONT_NAME, 12, "bold"), bg=BG_COLOR, fg=ACCENT).pack(
+            anchor="w", padx=18, pady=(14, 4))
+
+        body = (
+            "Your privacy comes first. Here is exactly what this app does:\n\n"
+            "  * Speech and the webcam are processed LOCALLY on this PC only.\n"
+            "  * Nothing is recorded, uploaded or shared with us.\n"
+            "  * Gemini Q&A (\"ask a question\") sends just your question to "
+            "Google only when YOU ask it, using a key stored locally.\n"
+            "  * Your settings and a capped activity log are stored in local "
+            "files next to the app (voc_config.json / voc_log.txt).\n\n"
+            "Quick start - try saying:\n"
+            "  \"help\"             - see what you can do\n"
+            "  \"start hand cursor\"- control the mouse with your hand\n"
+            "  \"two hand mode on\" - second hand holds Ctrl/Shift/Alt/Win\n"
+            "  \"take a note ...\"  - write to your notes file\n"
+        )
+        tk.Label(win, text=body, justify=tk.LEFT, bg=BG_COLOR, fg=FG_COLOR,
+                 font=(FONT_NAME, 9), anchor="nw", wraplength=486).pack(
+            fill=tk.BOTH, expand=True, padx=18, pady=(0, 8))
+
+        tk.Button(
+            win, text="I UNDERSTAND - GET STARTED", font=(FONT_NAME, 9,
+            "bold"), bg=BTN_TEST_BG_COLOR, fg=BTN_FG_COLOR,
+            activebackground="#2c6496", activeforeground=BTN_FG_COLOR,
+            relief=tk.FLAT, padx=14, pady=6, cursor="hand2",
+            command=self._close_first_run_wizard,
+        ).pack(anchor="e", padx=18, pady=(0, 14))
+        # Focus the window so the notice is seen (best-effort).
+        try:
+            win.grab_set()
+            win.focus_force()
+        except Exception:
+            pass
+
+    def _close_first_run_wizard(self):
+        """Dismiss the first-run wizard and remember it for next time."""
+        if self._wizard is not None:
+            try:
+                self._wizard.grab_release()
+            except Exception:
+                pass
+            try:
+                self._wizard.destroy()
+            except tk.TclError:
+                pass
+            self._wizard = None
+        if not bool(self.config.get("privacy_notice_shown", False)):
+            self.config["privacy_notice_shown"] = True
+            save_config(self.config)
+        self._append_log("[i] Welcome notice acknowledged.")
+
     def _on_train_update(self, data):
         """Handle a `train` event from the engine (GUI thread)."""
         if self._train_window is None:
@@ -3517,6 +3660,21 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             except Exception as exc:
                 self._append_log(f"[i] Hotkey '{hotkey}' unavailable: {exc}")
 
+    def _stop_tray(self):
+        """Remove the tray icon and unregister the global hotkey."""
+        if self._tray_hotkey is not None and KEYBOARD_OK:
+            try:
+                keyboard.remove_hotkey(self._tray_hotkey)
+            except Exception:
+                pass
+            self._tray_hotkey = None
+        if self._tray_icon is not None:
+            try:
+                self._tray_icon.stop()
+            except Exception:
+                pass
+            self._tray_icon = None
+
     def _tray_image(self):
         """Draw a small microphone-style icon for the tray.
 
@@ -3546,6 +3704,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
 
     def _restore_window(self):
         """Show and focus the main window (called from tray/hotkey)."""
+        self._resume_background_work()
         try:
             self.root.deiconify()
             self.root.lift()
@@ -3553,6 +3712,69 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             self.root.attributes("-topmost", True)
             self.root.after(120, lambda: self.root.attributes("-topmost",
                                                               False))
+        except tk.TclError:
+            pass
+
+    # ------------------------------------------------------------------
+    # "Only work while the window is open": pause mic + webcam when hidden
+    # ------------------------------------------------------------------
+    def _on_window_unmap(self, _event=None):
+        """The window was hidden (tray / taskbar minimize) - pause work."""
+        if self._closing or self._hidden_suspended:
+            return
+        try:
+            state = self.root.state()
+        except tk.TclError:
+            return
+        if state in ("withdrawn", "iconic"):
+            self._suspend_background_work()
+
+    def _on_window_map(self, _event=None):
+        """The window is visible again - resume the paused work."""
+        self._resume_background_work()
+
+    def _suspend_background_work(self):
+        """Stop the microphone and release the webcam (GUI thread only).
+
+        Remembering what was running lets _resume_background_work restore
+        exactly the same state when the window comes back.
+        """
+        if self._closing or self._hidden_suspended:
+            return
+        self._hidden_suspended = True
+        # Microphone / speech recognition.
+        self._was_listening = bool(self._listening_event.is_set())
+        if self._was_listening:
+            self.stop_listening()
+        # Webcam hand-cursor engine - stopping it releases the capture, so
+        # the camera LED turns off while the window is hidden.
+        engine = getattr(self, "_hand_engine", None)
+        self._hand_was_running = bool(engine is not None and
+                                      engine.is_running())
+        if engine is not None:
+            self.stop_hand_cursor()
+        if self._was_listening or self._hand_was_running:
+            self._append_log("[i] Window hidden - microphone and webcam "
+                             "paused.")
+
+    def _resume_background_work(self):
+        """Undo _suspend_background_work (GUI thread only)."""
+        if not self._hidden_suspended or self._closing:
+            return
+        self._hidden_suspended = False
+        if self._hand_was_running:
+            self.start_hand_cursor()
+        if self._was_listening:
+            self.start_listening()
+        self._hand_was_running = False
+        self._was_listening = False
+
+    def _hide_to_tray(self):
+        """Hide the window and pause all background work (GUI thread)."""
+        self._suspend_background_work()
+        try:
+            if self.root.state() != "withdrawn":
+                self.root.withdraw()
         except tk.TclError:
             pass
 
@@ -3569,7 +3791,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             if self.root.state() == "withdrawn":
                 self._restore_window()
             else:
-                self.root.withdraw()
+                self._hide_to_tray()
         except tk.TclError:
             pass
 
@@ -3584,7 +3806,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
         if (TRAY_OK and self.config.get("minimize_to_tray", True) and
                 self._tray_icon is not None):
             try:
-                self.root.withdraw()
+                self._hide_to_tray()
                 if not self._tray_hint_shown:
                     self._tray_hint_shown = True
                     self._append_log(
@@ -3628,6 +3850,9 @@ text="Say: Open <app> | Type <text> | Search <query> | "
             except tk.TclError:
                 pass
             self._train_window = None
+        # Dismiss any first-run wizard without marking it acknowledged.
+        if self._wizard is not None:
+            self._wizard = None
         if getattr(self, "_hand_engine", None) is not None:
             try:
                 self._hand_engine.stop()
@@ -3635,18 +3860,7 @@ text="Say: Open <app> | Type <text> | Search <query> | "
                 pass
             self._hand_engine = None
         # Stop the tray icon and unregister the global hotkey.
-        if self._tray_hotkey is not None and KEYBOARD_OK:
-            try:
-                keyboard.remove_hotkey(self._tray_hotkey)
-            except Exception:
-                pass
-            self._tray_hotkey = None
-        if self._tray_icon is not None:
-            try:
-                self._tray_icon.stop()
-            except Exception:
-                pass
-            self._tray_icon = None
+        self._stop_tray()
         try:
             pyautogui.FAILSAFE = False
         except Exception:

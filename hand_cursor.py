@@ -74,6 +74,11 @@
      Peace sign ............... hold ALT
      3 fingers ................ hold WIN key
 
+ The pose->key mapping can be remapped via the ``mod_keys`` constructor
+ argument (or ``set_mod_keys``) - a dict like ``{"fist": "shift"}`` is
+ merged over the defaults, and ``.two_hand_keys`` in the app config lets
+ users override it without code.
+
  The modifier pose must be stable for STABLE_FRAMES before the key goes
  down (same anti-accident debounce as gestures), a pose change re-keypresses
  cleanly (old key released first), and the key is always released when the
@@ -102,7 +107,7 @@
      engine.start()
      engine.stop()
 
- VERSION   : 1.9.0
+ VERSION   : 1.9.1
 ==============================================================================
 """
 
@@ -357,7 +362,8 @@ class HandCursorEngine:
 
     def __init__(self, camera_index=0, sensitivity=1.0, scroll_speed=1.0,
                  emit_preview=False, on_event=None, on_preview=None,
-                 arm_size=None, disarm_size=None, two_hand=True):
+                 arm_size=None, disarm_size=None, two_hand=True,
+                 mod_keys=None):
         if not HAND_DEPS_OK:
             raise RuntimeError("Hand-tracking packages are not installed.")
         self.camera_index = int(camera_index)
@@ -369,6 +375,7 @@ class HandCursorEngine:
         self._arm_size = float(arm_size) if arm_size else ARM_SIZE
         self._disarm_size = float(disarm_size) if disarm_size else DISARM_SIZE
         self.two_hand = bool(two_hand)  # 2nd hand = modifier key
+        self.set_mod_keys(mod_keys)
 
         self._running = threading.Event()
         self._thread = None
@@ -703,19 +710,35 @@ class HandCursorEngine:
     MOD_FIST  = "shift"
     MOD_PEACE = "alt"
     MOD_THREE = "win"
+    # pose name ("open"/"fist"/"peace"/"three") -> keyboard key. Users can
+    # remap any pose via mod_keys/set_mod_keys (merged over these defaults).
+    DEFAULT_MOD_KEYS = {
+        "open": MOD_OPEN, "fist": MOD_FIST,
+        "peace": MOD_PEACE, "three": MOD_THREE,
+    }
+
+    def set_mod_keys(self, mapping=None):
+        """Remap the modifier poses. ``{pose: key}`` entries are merged over
+        the defaults; ``None`` restores the defaults."""
+        keys = dict(self.DEFAULT_MOD_KEYS)
+        if mapping:
+            keys.update({k: v for k, v in mapping.items() if v})
+        self._mod_keys = keys
 
     def _modifier_key_for(self, lm):
         """Which modifier key the second hand should hold, or None."""
         n_up = sum(self._fingers_of(lm))
         if n_up >= 4:
-            return self.MOD_OPEN
-        if n_up == 3:
-            return self.MOD_THREE
-        if n_up == 2:
-            return self.MOD_PEACE
-        if n_up == 0:
-            return self.MOD_FIST
-        return None
+            pose = "open"
+        elif n_up == 3:
+            pose = "three"
+        elif n_up == 2:
+            pose = "peace"
+        elif n_up == 0:
+            pose = "fist"
+        else:
+            return None
+        return self._mod_keys.get(pose)
 
     def _release_modifier(self):
         """Always-safe key release; resets every modifier latch."""

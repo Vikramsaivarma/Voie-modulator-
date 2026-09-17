@@ -1,5 +1,5 @@
 ================================================================================
-VOICE CONTROL - QUICK START GUIDE  (v5.8.0)
+VOICE CONTROL - QUICK START GUIDE  (v5.9.0)
 ===============================================================================
 
 A Windows desktop app that lets you control your PC with your voice.
@@ -281,11 +281,15 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
     Ctrl+Alt+V to bring the window back. The tray menu has Quit.
     First hide: a helpful message is logged with the hotkey.
     Say "show window" / "restore window" to bring it back by voice.
+    While the window is hidden or minimized the app pauses the microphone
+    and releases the webcam (the camera light goes off); showing it again
+    resumes whatever was running. The app only works while it is open.
 
   LIFECYCLE:
     "Stop Listening" -> pauses; resume with "Start Listening"
         (or hands-free: "Hey vo" / "OK vo" / "Wake up vo")
     "Start Hand Cursor" / "Stop Hand Cursor"  -> air mouse on/off
+    "Two hand mode on" / "Two hand mode off"  -> modifier hand on/off
     "Train Gestures" / "Open trainer"  -> gesture practice window
     "Close gesture trainer" / "Stop trainer"
     "Draw macros" / "Macro mode"  -> hand engine draws shapes as actions
@@ -394,6 +398,24 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
          exactly as before. The key is held only while the pose is stable,
          never sticks (released on pose change / hand loss / stop), and the
          "2 Hands" checkbox in the HAND CURSOR card switches it on/off live.
+      -> v5.9.0: TWO-HAND POLISH + PRIVACY + ONLY WORKS WHILE OPEN
+         (hand_cursor v1.9.1).
+         * Voice: say "two hand mode on" / "two hand mode off" (also
+           "second hand ..." / "modifier hand ...") to toggle the modifier
+           hand hands-free.
+         * Remap: the modifier poses are remappable in voc_config.json via
+           "two_hand_keys" (e.g. {"fist": "alt"}), merged over the defaults
+           open=Ctrl, fist=Shift, peace=Alt, three=Win.
+         * Privacy: the first launch shows a one-time wizard explaining
+           that speech/vision leave the PC only when you use them, that
+           hand tracking is processed locally, and that settings/logs stay
+           beside the app. It is shown once (privacy_notice_shown).
+         * Only works while open: hiding the window - the X button, the tray
+           "Show / Hide", "minimize to tray", or the taskbar minimize button
+           - now pauses the microphone AND stops the webcam engine, so the
+           camera LED turns off whenever the app is not on screen. Showing
+           the window again restores exactly what was running before. The
+           webcam can never auto-start while the window is hidden.
 
   * Settings changes are lost after closing
       -> voc_config.json is saved automatically next to the app. Make
@@ -411,7 +433,7 @@ The HAND CURSOR row in the app turns your webcam into an air mouse:
   voc_config.json     Local settings + your Gemini API key (do not share)
   voc_notes.txt       Voice notes created with "take a note: ..." (optional)
   voc_log.txt         Activity log, appended on every run (capped ~2000 lines)
-  test_v59.py         Dev-only smoke test suite (v5.8.0 features + regressions)
+  test_v60.py         Dev-only smoke test suite (v5.9.0 features + regressions)
   .gitignore          Keeps voc_config.json out of git
 
   Enjoy controlling your PC by voice!
